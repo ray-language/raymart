@@ -1,0 +1,28 @@
+// The cart's internal face, for orders at checkout:
+//   cart.get    {user_id}  → the cart
+//   cart.clear  {user_id}  → {cleared}
+import rpc/rpc;
+import std/json;
+import common/logs;
+import common/tracing;
+from domain/ports import CartStore, ProductCatalog;
+from domain/cart import to_json;
+from application/carts import Carts, view, clear_cart;
+
+pub fn handle<S: CartStore, P: ProductCatalog>(carts: Carts<S, P>, req: rpc.Req) -> Result<json.Json, string> {
+    let user = match (json.get_string(req.params, "user_id")) {
+        Option.Some(u) => u,
+        Option.None => return Result.Err("invalid: missing param 'user_id'"),
+    };
+    logs.info("cart", tracing.trace_id(req.traceparent), "rpc", [("method", req.method)]);
+    if (req.method == "cart.get") {
+        return Result.Ok(to_json(view(carts, user)?));
+    }
+    if (req.method == "cart.clear") {
+        let n = clear_cart(carts, user)?;
+        let m: Map<string, json.Json> = Map.new();
+        m.insert("cleared", json.Json.JBool(n > 0));
+        return Result.Ok(json.Json.JObject(m));
+    }
+    Result.Err("invalid: unknown method ${req.method}")
+}

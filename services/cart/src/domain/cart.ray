@@ -1,0 +1,122 @@
+// The cart's domain: a user's cart and the rules for changing it. Prices come from the
+// catalog when an item is added (the client never sets a price).
+import std/json;
+
+pub const MAX_QTY: int = 99;
+
+pub struct Item {
+    product_id: int,
+    name: string,
+    price_cents: int,
+    qty: int,
+}
+
+pub struct Cart {
+    user_id: string,
+    items: [Item],
+}
+
+/// What the cart needs to know about a product (from the catalog port).
+pub struct ProductInfo {
+    id: int,
+    name: string,
+    price_cents: int,
+    stock: int,
+}
+
+pub fn empty(user_id: string) -> Cart {
+    Cart { user_id: user_id, items: [] }
+}
+
+pub fn total_cents(c: Cart) -> int {
+    c.items.fold(0, fn(acc: int, it: Item) -> int { acc + it.price_cents * it.qty })
+}
+
+fn find(c: Cart, product_id: int) -> Option<int> {
+    for i in 0..c.items.len() {
+        if (c.items[i].product_id == product_id) {
+            return Option.Some(i);
+        }
+    }
+    Option.None
+}
+
+/// Adds `qty` units of `p` (merging with an existing line); refuses more than the stock or
+/// more than MAX_QTY per line.
+pub fn add(c: Cart, p: ProductInfo, qty: int) -> Result<Cart, string> {
+    if (qty <= 0) {
+        return Result.Err("invalid: quantity must be positive");
+    }
+    let current = match (find(c, p.id)) {
+        Option.Some(i) => c.items[i].qty,
+        Option.None => 0,
+    };
+    set_qty(c, p, current + qty)
+}
+
+/// Sets the quantity of `p` in the cart (0 removes the line).
+pub fn set_qty(c: Cart, p: ProductInfo, qty: int) -> Result<Cart, string> {
+    if (qty < 0) {
+        return Result.Err("invalid: quantity cannot be negative");
+    }
+    if (qty > MAX_QTY) {
+        return Result.Err("invalid: at most ${MAX_QTY} units per product");
+    }
+    if (qty > p.stock) {
+        return Result.Err("out_of_stock: only ${p.stock} units of product ${p.id} left");
+    }
+    var items: [Item] = [];
+    var placed = false;
+    for it in c.items {
+        if (it.product_id == p.id) {
+            placed = true;
+            if (qty > 0) {
+                items.push(Item { product_id: p.id, name: p.name, price_cents: p.price_cents, qty: qty });
+            }
+        } else {
+            items.push(it);
+        }
+    }
+    if (!placed && qty > 0) {
+        items.push(Item { product_id: p.id, name: p.name, price_cents: p.price_cents, qty: qty });
+    }
+    Result.Ok(Cart { user_id: c.user_id, items: items })
+}
+
+pub fn remove(c: Cart, product_id: int) -> Cart {
+    Cart { user_id: c.user_id, items: c.items.filter(fn(it: Item) -> bool { it.product_id != product_id }) }
+}
+
+pub fn to_json(c: Cart) -> json.Json {
+    var items: [json.Json] = [];
+    for it in c.items {
+        let m: Map<string, json.Json> = Map.new();
+        m.insert("product_id", json.Json.JNum(it.product_id as float));
+        m.insert("name", json.Json.JStr(it.name));
+        m.insert("price_cents", json.Json.JNum(it.price_cents as float));
+        m.insert("qty", json.Json.JNum(it.qty as float));
+        items.push(json.Json.JObject(m));
+    }
+    let m: Map<string, json.Json> = Map.new();
+    m.insert("user_id", json.Json.JStr(c.user_id));
+    m.insert("items", json.Json.JArray(items));
+    m.insert("total_cents", json.Json.JNum(total_cents(c) as float));
+    json.Json.JObject(m)
+}
+
+pub fn from_json(j: json.Json) -> Result<Cart, string> {
+    let user = match (json.get_string(j, "user_id")) {
+        Option.Some(u) => u,
+        Option.None => return Result.Err("cart without user_id"),
+    };
+    var items: [Item] = [];
+    for it in json.get_array(j, "items").unwrap_or([]) {
+        items.push(Item {
+            product_id: json.get_int(it, "product_id").unwrap_or(0),
+            name: json.get_string(it, "name").unwrap_or(""),
+            price_cents: json.get_int(it, "price_cents").unwrap_or(0),
+            qty: json.get_int(it, "qty").unwrap_or(0),
+        });
+    }
+    Result.Ok(Cart { user_id: user, items: items })
+}

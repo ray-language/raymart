@@ -2,6 +2,10 @@
 # Only the gateway (8088) and the health dashboard (8091) are published on the host; the
 # databases, the queue and the services talk on the compose network only.
 
+# The development JWT secret shared by raygate and the services (override in production).
+x-jwt: &jwt
+  JWT_SECRET: ${RAYMART_JWT_SECRET:-raymart-dev-secret-change-me}
+
 x-raylang-build: &raylang-build
   context: .
   dockerfile: docker/Dockerfile
@@ -70,6 +74,26 @@ services:
       RPC_PORT: "9000"
     depends_on:
       postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/app", "health"]
+      interval: 3s
+      retries: 20
+
+  cart:
+    build:
+      <<: *raylang-build
+      args: { APP_DIR: services/cart }
+    environment:
+      <<: *jwt
+      RAYKV_HOST: raykv
+      RAYKV_PORT: "7379"
+      PRODUCTS_HOST: products
+      PRODUCTS_RPC_PORT: "9000"
+      HTTP_PORT: "8080"
+      RPC_PORT: "9000"
+    depends_on:
+      raykv: { condition: service_started }
+      products: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "/usr/local/bin/app", "health"]
       interval: 3s

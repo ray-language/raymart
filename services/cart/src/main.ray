@@ -1,0 +1,55 @@
+// cart — shopping carts. Composition root: raykv behind the CartStore port, the products rpc
+// API behind the ProductCatalog port; HTTP for the public API and rpc for orders.
+//
+//   cart            serve (HTTP on HTTP_PORT, rpc on RPC_PORT)
+//   cart health     exit 0 if this container's HTTP answers /health
+import web/framework as web;
+import rpc/rpc;
+import net/http;
+import std/json;
+import common/config;
+import common/logs;
+from application/carts import new_carts;
+import adapters/outbound/raykv_store;
+import adapters/outbound/products_rpc;
+import adapters/inbound/http as http_in;
+import adapters/inbound/rpc as rpc_in;
+
+fn health(port: int) -> int {
+    match (http.fetch("http://127.0.0.1:${port}/health")) {
+        Result.Ok(r) => if (r.status == 200) { 0 } else { 1 },
+        Result.Err(_) => 1,
+    }
+}
+
+fn main() -> int {
+    let http_port = config.get_int("HTTP_PORT", 8080);
+    let rpc_port = config.get_int("RPC_PORT", 9000);
+    let av = args();
+    if (av.len() > 0 && av[0] == "health") {
+        return health(http_port);
+    }
+    let secret = config.required("JWT_SECRET");
+    let store = raykv_store.RaykvCarts {
+        host: config.get("RAYKV_HOST", "127.0.0.1"),
+        port: config.get_int("RAYKV_PORT", 7379),
+        ttl_s: config.get_int("CART_TTL_S", 604800),
+    };
+    let catalog = products_rpc.new_products_rpc(config.get("PRODUCTS_HOST", "127.0.0.1"), config.get_int("PRODUCTS_RPC_PORT", 9000), config.get_int("PRODUCTS_DEADLINE_MS", 2000));
+    let carts = new_carts(store, catalog);
+
+    let _http = spawn(fn() {
+        match (web.listen_graceful(fn() -> web.App { http_in.build(carts, secret) }, "0.0.0.0", http_port, 3000)) {
+            Result.Err(e) => logs.error("cart", "", "http server stopped", [("error", e)]),
+            Result.Ok(_) => { },
+        }
+    });
+    logs.info("cart", "", "serving", [("http", to_string(http_port)), ("rpc", to_string(rpc_port))]);
+    match (rpc.serve_graceful("0.0.0.0", rpc_port, 3000, fn(req: rpc.Req) -> Result<json.Json, string> { rpc_in.handle(carts, req) })) {
+        Result.Ok(_) => 0,
+        Result.Err(e) => {
+            logs.error("cart", "", "rpc server stopped", [("error", e)]);
+            1
+        },
+    }
+}

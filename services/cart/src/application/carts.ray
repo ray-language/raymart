@@ -1,0 +1,46 @@
+// The cart's use cases, generic over its two ports.
+from domain/ports import CartStore, ProductCatalog;
+from domain/cart import Cart, add, set_qty, remove;
+
+pub struct Carts<S: CartStore, P: ProductCatalog> {
+    store: S,
+    catalog: P,
+}
+
+pub fn new_carts<S: CartStore, P: ProductCatalog>(store: S, catalog: P) -> Carts<S, P> {
+    Carts { store: store, catalog: catalog }
+}
+
+pub fn view<S: CartStore, P: ProductCatalog>(c: Carts<S, P>, user: string) -> Result<Cart, string> {
+    c.store.load(user)
+}
+
+pub fn add_item<S: CartStore, P: ProductCatalog>(c: Carts<S, P>, user: string, product_id: int, qty: int, tp: string) -> Result<Cart, string> {
+    let product = c.catalog.product(product_id, tp)?;
+    let next = add(c.store.load(user)?, product, qty)?;
+    c.store.save(next)?;
+    Result.Ok(next)
+}
+
+pub fn set_item_qty<S: CartStore, P: ProductCatalog>(c: Carts<S, P>, user: string, product_id: int, qty: int, tp: string) -> Result<Cart, string> {
+    let current = c.store.load(user)?;
+    if (qty == 0) {
+        let next = remove(current, product_id);
+        c.store.save(next)?;
+        return Result.Ok(next);
+    }
+    let product = c.catalog.product(product_id, tp)?;
+    let next = set_qty(current, product, qty)?;
+    c.store.save(next)?;
+    Result.Ok(next)
+}
+
+pub fn remove_item<S: CartStore, P: ProductCatalog>(c: Carts<S, P>, user: string, product_id: int) -> Result<Cart, string> {
+    let next = remove(c.store.load(user)?, product_id);
+    c.store.save(next)?;
+    Result.Ok(next)
+}
+
+pub fn clear_cart<S: CartStore, P: ProductCatalog>(c: Carts<S, P>, user: string) -> Result<int, string> {
+    c.store.clear(user)
+}
