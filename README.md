@@ -144,7 +144,7 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
 | Integración | PostgreSQL 18: 5 (seis pedidos por la última unidad: gana uno; conexiones matadas por el servidor) · raykv: 2 (con TTL) · MySQL 8.4: 4 (pedido + outbox atómicos; conexiones matadas) · MongoDB 8: 2 (cinco CreateIntent concurrentes: un intent) |
 | gRPC | contrato payment en proceso; interop con `grpcurl` (librería) |
 | Docker | las 11 piezas sanas; `make e2e` 19/19; `make chaos` pendiente → pagado; `make chaos-db` 19/19 tras reiniciar las bases; raywatch 11/11 en verde |
-| Carga | 29 600 lecturas/s directas y 14 900 por el gateway, 146 compras/s de punta a punta con 64 usuarios; 0 errores y todas las invariantes ([perf/README.md](perf/README.md)) |
+| Carga | 29 600 lecturas/s directas y 16 900 por el gateway, ~140 compras/s de punta a punta con 64 usuarios; 0 errores y todas las invariantes ([perf/README.md](perf/README.md)) |
 
 ## Notas
 

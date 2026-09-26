@@ -2,8 +2,9 @@
 
 `make bench` somete el sistema a carga creciente, comprueba que las reglas de negocio
 aguantan la concurrencia y deja un informe en `perf/results/<fecha>/`. Hay dos corridas de
-referencia: la [línea base](baseline.md) (hito 8, el diagnóstico) y
-[after-pools.md](after-pools.md) (hito 9, tras arreglar lo diagnosticado).
+referencia: la [línea base](baseline.md) (hito 8, el diagnóstico),
+[after-pools.md](after-pools.md) (hito 9, tras arreglar lo diagnosticado) y
+[after-gateway.md](after-gateway.md) (hito 10, el gateway).
 
 ```bash
 make up            # el sistema arriba
@@ -166,13 +167,69 @@ de PostgreSQL y MySQL matan las conexiones desde el servidor y fallan sin el rei
 chaos-db` reinicia las cuatro bases y exige que el siguiente e2e pase entero (19/19, tres veces
 seguidas). El rendimiento no cambió.
 
-### Límites que quedan
+### Límites que quedaron tras el hito 9
 
 - **Lecturas directas**: ~29 600 ok/s a 32 VUs, con products en ~2,3 núcleos y PostgreSQL en
   ~1,4. Es el techo de la máquina (6 CPUs para Docker) más que del diseño.
 - **Por el gateway**: ~15 000 ok/s, con raygate en ~1,4 núcleos. Cada petición pasa dos veces
-  por su actor de control (admisión y métricas); es el siguiente sitio donde mirar.
+  por su actor de control (admisión y métricas). Es lo que ataca el hito 10.
 - **Carrito**: ~2 300 ok/s, con cart, raygate y raykv a ~1 núcleo cada uno. Un alta hace un rpc
   a products y dos operaciones en raykv.
 - **Saga**: sigue escalando a 64 VUs (145,8 compras/s, colas con pico de 34/31) y ya está
   limitada por la latencia: ~0,2 s por pedido, con el sondeo del cliente cada 200 ms incluido.
+
+## Hito 10: el gateway
+
+Método: raygate compilado en local y montado sobre su imagen, `browse` con 64 VUs tras un
+calentamiento, y cada candidato comparado A/B en tres rondas alternas. La varianza entre
+corridas es de ±3 %.
+
+### Dónde se iba el tiempo
+
+| variante de raygate (experimento, no versión) | 64 VUs | CPU de raygate | CPU por petición |
+|---|---|---|---|
+| hito 9 | ~14 300 ok/s | ~100 % | ~70 µs |
+| sin log de acceso | 17 023 | 125 % | ~73 µs |
+| sin log ni actor de control | 22 481 | 65 % | **~29 µs** |
+
+El actor de control (rate limit por IP, circuit breaker y métricas, que tienen que vivir en
+una sola fibra porque raylang no comparte memoria entre fibras) costaba **~40 µs de CPU por
+petición**, más que todo el trabajo de proxy. Un microbenchmark nativo lo explica: el canal es
+barato (0,7 µs un envío), pero **una ida y vuelta pedir/responder entre hilos cuesta ~30 µs**,
+frente a 1,4 µs cuando las dos fibras comparten hilo (RAYLANG-FINDINGS #75).
+
+Lo que **no** funcionó, medido y descartado:
+- Abaratar las métricas del actor (contadores en arrays en vez de `net/metrics`, que construía
+  ~14 cadenas por petición): sin mejora. El coste era despertar al actor, no su trabajo.
+- Menos hilos del planificador (`RAYLANG_THREADS` 1–3): igual o peor.
+- Quitar el actor: no es opción. Sin memoria compartida, atómicos ni `yield`, no hay otra forma
+  de mantener un breaker y un rate limit correctos.
+
+### Qué cambió: despertar menos fibras por petición
+
+1. El log de acceso lo escribe **una sola fibra, por lotes**, en vez de una escritura a stdout
+   por petición (raygate#5).
+2. La línea de cada petición **viaja en el mensaje `Report`** que la petición ya enviaba al
+   actor. El actor junta las de todo lo que tenga en cola y pasa el lote a esa fibra (raygate#6):
+   el actor nunca espera a stdout, así que un consumidor de logs lento no puede frenar la
+   admisión.
+
+A/B en tres rondas: una escritura por petición ~14 250 ok/s → escritor por lotes ~15 640 →
+línea dentro del `Report` ~16 850. Es lo mismo que rendía raygate **sin** log: el log de acceso
+sale prácticamente gratis. No se pierde nada: 239 379 peticiones dieron 239 379 líneas, todas
+JSON válido. Con 1 VU no cambia nada (2 284 frente a 2 301 ok/s).
+
+| corrida completa, 64 VUs | hito 9 | hito 10 |
+|---|---|---|
+| `browse` por raygate | 14 906 ok/s · p99 12,1 ms | **16 885 ok/s · p99 11,3 ms** |
+| `browse` por raygate, 32 VUs | 13 088 ok/s | **14 993 ok/s** |
+| el resto (`browse-direct`, `cart`, `purchase`, `drain`) | | sin cambios, dentro del ruido |
+| errores | 0 | 0 |
+
+### De paso: raykv y rayq no tenían healthcheck
+
+Una corrida de `make chaos-db` falló una vez: el e2e empezó antes de que raykv escuchara, porque
+sin healthcheck `up --wait` lo daba por listo al arrancar el contenedor. Ahora raykv y rayq
+tienen healthcheck (un `bash` abriendo el puerto; la imagen solo trae el binario), los servicios
+esperan a que estén `healthy`, y `chaos-db` pasó las 3 veces que se repitió después. (Antes del
+arreglo, la carrera no se volvió a reproducir en 5 intentos: era intermitente.)
