@@ -30,12 +30,18 @@ fn main() -> int {
         return health(http_port);
     }
     let secret = config.required("JWT_SECRET");
-    let store = raykv_store.RaykvCarts {
-        host: config.get("RAYKV_HOST", "127.0.0.1"),
-        port: config.get_int("RAYKV_PORT", 7379),
-        ttl_s: config.get_int("CART_TTL_S", 604800),
-    };
-    let catalog = products_rpc.new_products_rpc(config.get("PRODUCTS_HOST", "127.0.0.1"), config.get_int("PRODUCTS_RPC_PORT", 9000), config.get_int("PRODUCTS_DEADLINE_MS", 2000));
+    let store = raykv_store.new_carts_store(
+        config.get("RAYKV_HOST", "127.0.0.1"),
+        config.get_int("RAYKV_PORT", 7379),
+        config.get_int("CART_TTL_S", 604800),
+        config.get_int("RAYKV_POOL_SIZE", 64)
+    );
+    let catalog = products_rpc.new_products_rpc(
+        config.get("PRODUCTS_HOST", "127.0.0.1"),
+        config.get_int("PRODUCTS_RPC_PORT", 9000),
+        config.get_int("PRODUCTS_DEADLINE_MS", 2000),
+        config.get_int("RPC_POOL_SIZE", 32)
+    );
     let carts = new_carts(store, catalog);
 
     let _http = spawn(fn() {
@@ -44,7 +50,12 @@ fn main() -> int {
             Result.Ok(_) => { },
         }
     });
-    logs.info("cart", "", "serving", [("http", to_string(http_port)), ("rpc", to_string(rpc_port))]);
+    logs.info(
+        "cart",
+        "",
+        "serving",
+        [("http", to_string(http_port)), ("rpc", to_string(rpc_port))]
+    );
     match (rpc.serve_graceful("0.0.0.0", rpc_port, 3000, fn(req: rpc.Req) -> Result<json.Json, string> { rpc_in.handle(carts, req) })) {
         Result.Ok(_) => 0,
         Result.Err(e) => {

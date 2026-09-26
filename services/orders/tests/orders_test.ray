@@ -1,7 +1,14 @@
 import std/json;
 import common/events;
 from domain/order import Order, CartLine, PaymentResult, PENDING, PAID, CANCELLED;
-from application/orders import Orders, new_orders, checkout, get_order, list_orders, relay_outbox, apply_payment_result;
+from application/orders import
+    Orders,
+    new_orders,
+    checkout,
+    get_order,
+    list_orders,
+    relay_outbox,
+    apply_payment_result;
 import adapters/outbound/memory;
 import adapters/inbound/workers;
 
@@ -17,9 +24,12 @@ fn world() -> World {
         repo: memory.new_memory_orders(),
         cart: memory.new_fake_cart(),
         inventory: memory.new_fake_inventory([(1, 5), (2, 1)]),
-        payments: memory.new_fake_payments(),
+        payments: memory.new_fake_payments()
     };
-    w.cart.lines.insert("ada", [CartLine { product_id: 1, qty: 2 }, CartLine { product_id: 2, qty: 1 }]);
+    w.cart.lines.insert(
+        "ada",
+        [CartLine { product_id: 1, qty: 2 }, CartLine { product_id: 2, qty: 1 }]
+    );
     w
 }
 
@@ -47,7 +57,7 @@ fn checkout_reserves_stores_the_order_and_its_outbox_and_clears_the_cart() {
     match (checkout(orders(w), "ada", "4242", "o1", 1000, "tp")) {
         Result.Ok(o) => {
             assert_eq(o.status, PENDING);
-            assert_eq(o.total_cents, 3000); // catalog prices: 1000 × 3
+            assert_eq(o.total_cents, 3000);  // catalog prices: 1000 × 3
         },
         Result.Err(e) => panic(e),
     }
@@ -61,7 +71,7 @@ fn checkout_reserves_stores_the_order_and_its_outbox_and_clears_the_cart() {
 fn checkout_refuses_bad_input_before_touching_anything() {
     let w = world();
     assert_eq(code(checkout(orders(w), "ada", "42", "o1", 1, "")), "invalid");
-    assert_eq(code(checkout(orders(w), "bob", "4242", "o2", 1, "")), "invalid"); // empty cart
+    assert_eq(code(checkout(orders(w), "bob", "4242", "o2", 1, "")), "invalid");  // empty cart
     assert_eq(w.inventory.log.len(), 0);
 }
 
@@ -71,7 +81,7 @@ fn out_of_stock_creates_no_order() {
     w.cart.lines.insert("ada", [CartLine { product_id: 2, qty: 3 }]);
     assert_eq(code(checkout(orders(w), "ada", "4242", "o1", 1, "")), "out_of_stock");
     assert_eq(w.repo.orders.len(), 0);
-    assert(w.cart.lines.contains_key("ada")); // the cart stays for the user to fix
+    assert(w.cart.lines.contains_key("ada"));  // the cart stays for the user to fix
 }
 
 @test
@@ -79,7 +89,7 @@ fn a_failed_store_releases_the_reservation() {
     let w = world();
     w.repo.fail_create[0] = true;
     assert_eq(code(checkout(orders(w), "ada", "4242", "o1", 1, "")), "unavailable");
-    assert_eq(w.inventory.stock.get(1).unwrap_or(-1), 5); // compensated
+    assert_eq(w.inventory.stock.get(1).unwrap_or(-1), 5);  // compensated
     assert(w.inventory.log.contains("release o1"));
 }
 
@@ -92,7 +102,7 @@ fn the_outbox_survives_a_payment_outage() {
     assert_eq(w.repo.pending_outbox_count(), 1);
     w.payments.down[0] = false;
     assert_eq(relay_outbox(orders(w), 10).unwrap_or(-1), 1);
-    assert_eq(relay_outbox(orders(w), 10).unwrap_or(-1), 0); // delivered once
+    assert_eq(relay_outbox(orders(w), 10).unwrap_or(-1), 0);  // delivered once
     assert_eq(w.payments.received.len(), 1);
 }
 
@@ -111,11 +121,19 @@ fn a_successful_payment_commits_stock_and_pays_the_order_once() {
 fn a_declined_payment_releases_stock_and_cancels() {
     let w = world();
     let _ = checkout(orders(w), "ada", "4242", "o1", 1, "");
-    let declined = PaymentResult { order_id: "o1", payment_id: "pi_1", succeeded: false, reason: "card declined" };
+    let declined = PaymentResult {
+        order_id: "o1",
+        payment_id: "pi_1",
+        succeeded: false,
+        reason: "card declined"
+    };
     assert_eq(apply_payment_result(orders(w), declined, "").unwrap_or(""), CANCELLED);
     assert_eq(status(w, "o1"), CANCELLED);
     assert_eq(w.inventory.stock.get(1).unwrap_or(-1), 5);
-    assert_eq(match (w.repo.orders.get("o1")) { Option.Some(o) => o.reason, Option.None => "" }, "card declined");
+    assert_eq(match (w.repo.orders.get("o1")) {
+        Option.Some(o) => o.reason,
+        Option.None => "",
+    }, "card declined");
 }
 
 @test
@@ -125,7 +143,7 @@ fn a_result_is_retried_while_products_is_down() {
     w.inventory.down[0] = true;
     let ok = PaymentResult { order_id: "o1", payment_id: "pi_1", succeeded: true, reason: "" };
     assert(apply_payment_result(orders(w), ok, "").is_err());
-    assert_eq(status(w, "o1"), PENDING); // not moved: the retry will redo the stock step
+    assert_eq(status(w, "o1"), PENDING);  // not moved: the retry will redo the stock step
     w.inventory.down[0] = false;
     assert_eq(apply_payment_result(orders(w), ok, "").unwrap_or(""), PAID);
 }
@@ -148,16 +166,26 @@ fn event(kind: string, data: string) -> string {
 fn the_results_consumer_acks_applies_and_retries() {
     let w = world();
     let _ = checkout(orders(w), "ada", "4242", "o1", 1, "");
-    assert(workers.handle_message(orders(w), event("payment.succeeded", `{"order_id":"o1","payment_id":"pi_1"}`)));
+    assert(
+        workers.handle_message(
+            orders(w),
+            event("payment.succeeded", `{"order_id":"o1","payment_id":"pi_1"}`)
+        )
+    );
     assert_eq(status(w, "o1"), PAID);
-    assert(workers.handle_message(orders(w), "not json")); // dropped, not retried forever
+    assert(workers.handle_message(orders(w), "not json"));  // dropped, not retried forever
     assert(workers.handle_message(orders(w), event("payment.weird", `{"order_id":"o1"}`)));
 
     let _ = checkout(orders(w), "ada", "4242", "o2", 1, "");
     w.cart.lines.insert("ada", [CartLine { product_id: 1, qty: 1 }]);
     let _ = checkout(orders(w), "ada", "4242", "o3", 1, "");
     w.inventory.down[0] = true;
-    assert(!workers.handle_message(orders(w), event("payment.failed", `{"order_id":"o3","reason":"declined"}`))); // nack
+    assert(
+        !workers.handle_message(
+            orders(w),  // nack
+            event("payment.failed", `{"order_id":"o3","reason":"declined"}`)
+        )
+    );
 }
 
 @test
@@ -167,10 +195,10 @@ fn a_rejected_payment_request_does_not_block_the_outbox() {
     w.cart.lines.insert("ada", [CartLine { product_id: 1, qty: 1 }]);
     let _ = checkout(orders(w), "ada", "4242", "fine", 1, "");
     w.payments.reject.push("poison");
-    assert_eq(relay_outbox(orders(w), 10).unwrap_or(-1), 2); // both handled, the queue moved on
+    assert_eq(relay_outbox(orders(w), 10).unwrap_or(-1), 2);  // both handled, the queue moved on
     assert_eq(status(w, "poison"), CANCELLED);
     assert(w.inventory.log.contains("release poison"));
-    assert_eq(status(w, "fine"), PENDING); // its payment request went out
+    assert_eq(status(w, "fine"), PENDING);  // its payment request went out
     assert_eq(w.payments.received.len(), 1);
     assert_eq(relay_outbox(orders(w), 10).unwrap_or(-1), 0);
 }

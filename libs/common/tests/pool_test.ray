@@ -1,0 +1,22 @@
+import pool;
+
+@test
+fn domain_refusals_keep_the_connection() {
+    assert(pool.connection_ok("out_of_stock: product 1 has 0 left"));
+    assert(pool.connection_ok("not_found: no product 9"));
+    assert(pool.connection_ok("conflict: order o1 is not pending"));
+    assert(!pool.connection_ok("unavailable: products database: broken pipe"));
+    assert(!pool.connection_ok("ERROR 40001: deadlock"));
+}
+
+@test
+fn only_reused_connections_that_broke_are_retried() {
+    assert(pool.retry_on_fresh("Broken pipe (os error 32)", true));
+    assert(!pool.retry_on_fresh("Broken pipe (os error 32)", false));
+    assert(!pool.retry_on_fresh("out_of_stock: product 1 has 0 left", true));
+    assert(!pool.retry_on_fresh("", true));
+    let ok: Result<int, string> = Result.Ok(1);
+    assert_eq(pool.error_of(ok), "");
+    let bad: Result<int, string> = Result.Err("x");
+    assert_eq(pool.error_of(bad), "x");
+}

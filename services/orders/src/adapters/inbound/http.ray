@@ -16,11 +16,19 @@ from domain/order import Order, to_json;
 from application/orders import Orders, checkout, get_order, list_orders;
 
 fn fail(ctx: web.Ctx, res: web.Res, e: string) {
-    logs.warn("orders", tracing.trace_id(web.header_of(ctx, "traceparent")), "request failed", [("path", ctx.path), ("error", e)]);
+    logs.warn(
+        "orders",
+        tracing.trace_id(web.header_of(ctx, "traceparent")),
+        "request failed",
+        [("path", ctx.path), ("error", e)]
+    );
     httpx.fail(res, e);
 }
 
-pub fn build<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(orders: Orders<R, C, I, P>, jwt_secret: string) -> web.App {
+pub fn build<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(
+    orders: Orders<R, C, I, P>,
+    jwt_secret: string
+) -> web.App {
     let app = web.new_app();
     web.GET(app, "/health", fn(ctx: web.Ctx, res: web.Res) {
         httpx.ok(res, `{"status":"ok","service":"orders"}`);
@@ -45,7 +53,12 @@ pub fn build<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(orde
         let tp = web.header_of(ctx, "traceparent");
         match (checkout(orders, web.local(ctx, "user"), card, uuid.uuid_v7(), time.now(), tp)) {
             Result.Ok(o) => {
-                logs.info("orders", tracing.trace_id(tp), "order placed", [("order_id", o.id), ("total_cents", to_string(o.total_cents))]);
+                logs.info(
+                    "orders",
+                    tracing.trace_id(tp),
+                    "order placed",
+                    [("order_id", o.id), ("total_cents", to_string(o.total_cents))]
+                );
                 web.json(web.status(res, 202), json.stringify(to_json(o)));
             },
             Result.Err(e) => fail(ctx, res, e),

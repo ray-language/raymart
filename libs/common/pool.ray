@@ -1,0 +1,46 @@
+// Connection pools for the outbound adapters. Fibers do not share heaps, so a connection
+// cached in an adapter value would be a per-request copy; a socket handle passed through a
+// channel is the same socket in every fiber. Each adapter therefore keeps a bounded channel of
+// slots — the shape of `rpc.pool` (packages/rpc):
+//
+//   enum PgSlot { Ready(postgres.Conn), Empty }       slots: Channel<PgSlot>, `size` of them
+//
+//   checkout  recv a slot: Ready → use it; Empty → dial (a failed dial sends Empty back). A
+//             fiber parks while every connection is in use: backpressure, not a busy-wait
+//   checkin   send Ready(conn) back when the operation left the connection healthy
+//   discard   close it and send Empty back when the wire failed: that slot redials next time,
+//             so the pool heals after an outage
+//
+//   retry     a REUSED connection that fails on the wire was most likely closed by the server
+//             while idle (a database restart, an idle timeout): the operation runs once more on a
+//             fresh connection, so a restart does not surface one error per pooled connection.
+//             Only for idempotent operations; a fresh connection that fails is not retried.
+//
+// The slot enum and its functions are concrete per adapter on purpose: generic code over a
+// `Channel<Slot<T>>` does not compile in native builds with raylang 1.27.11
+// (RAYLANG-FINDINGS #71).
+
+/// Whether an operation's error leaves its connection usable: the domain's own refusals
+/// ("out_of_stock: …", "not_found: …", "invalid: …", "conflict: …") come from the adapter's
+/// logic, not from the wire; anything else may have left the connection out of sync.
+pub fn connection_ok(error: string) -> bool {
+    error.starts_with("out_of_stock:")
+        || error.starts_with("not_found:")
+        || error.starts_with("invalid:")
+        || error.starts_with("conflict:")
+}
+
+/// The error of a result, or "" for a success.
+pub fn error_of<T>(r: Result<T, string>) -> string {
+    match (r) {
+        Result.Ok(_) => "",
+        Result.Err(e) => e,
+    }
+}
+
+/// Whether an operation that failed with `error` on a connection should run once more on a
+/// fresh one: the connection was reused (it may have gone stale while idle) and the failure
+/// came from the wire, not from the domain.
+pub fn retry_on_fresh(error: string, reused: bool) -> bool {
+    reused && error != "" && !connection_ok(error)
+}

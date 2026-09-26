@@ -25,7 +25,14 @@ impl OrderRepository for MemoryOrders {
             return Result.Err("unavailable: orders database: down");
         }
         self.orders.insert(order.id, order);
-        self.outbox.push(OutboxEntry { id: self.outbox.len() + 1, order_id: order.id, kind: outbox_kind, payload: outbox_payload });
+        self.outbox.push(
+            OutboxEntry {
+                id: self.outbox.len() + 1,
+                order_id: order.id,
+                kind: outbox_kind,
+                payload: outbox_payload
+            }
+        );
         Result.Ok(1)
     }
 
@@ -43,13 +50,32 @@ impl OrderRepository for MemoryOrders {
         Result.Ok(out)
     }
 
-    fn transition(self, id: string, from: string, to: string, payment_id: string, reason: string) -> Result<bool, string> {
+    fn transition(
+        self,
+        id: string,
+        from: string,
+        to: string,
+        payment_id: string,
+        reason: string
+    ) -> Result<bool, string> {
         match (self.orders.get(id)) {
             Option.Some(o) => {
                 if (o.status != from) {
                     return Result.Ok(false);
                 }
-                self.orders.insert(id, Order { id: o.id, user_id: o.user_id, status: to, items: o.items, total_cents: o.total_cents, created_ms: o.created_ms, payment_id: payment_id, reason: reason });
+                self.orders.insert(
+                    id,
+                    Order {
+                        id: o.id,
+                        user_id: o.user_id,
+                        status: to,
+                        items: o.items,
+                        total_cents: o.total_cents,
+                        created_ms: o.created_ms,
+                        payment_id: payment_id,
+                        reason: reason
+                    }
+                );
                 Result.Ok(true)
             },
             Option.None => Result.Ok(false),
@@ -110,7 +136,12 @@ pub fn new_fake_inventory(stock: [(int, int)]) -> FakeInventory {
 }
 
 impl Inventory for FakeInventory {
-    fn reserve(self, order_id: string, lines: [CartLine], traceparent: string) -> Result<[OrderItem], string> {
+    fn reserve(
+        self,
+        order_id: string,
+        lines: [CartLine],
+        traceparent: string
+    ) -> Result<[OrderItem], string> {
         for l in lines {
             if (self.stock.get(l.product_id).unwrap_or(0) < l.qty) {
                 return Result.Err("out_of_stock: product ${l.product_id}");
@@ -119,7 +150,14 @@ impl Inventory for FakeInventory {
         var out: [OrderItem] = [];
         for l in lines {
             self.stock.insert(l.product_id, self.stock.get(l.product_id).unwrap_or(0) - l.qty);
-            out.push(OrderItem { product_id: l.product_id, name: "p${l.product_id}", price_cents: 1000, qty: l.qty });
+            out.push(
+                OrderItem {
+                    product_id: l.product_id,
+                    name: "p${l.product_id}",
+                    price_cents: 1000,
+                    qty: l.qty
+                }
+            );
         }
         self.reserved.insert(order_id, lines);
         self.log.push("reserve " + order_id);

@@ -34,13 +34,14 @@ fn main() -> int {
         return health(http_port);
     }
     let secret = config.required("JWT_SECRET");
-    let repo = mongo_intents.MongoIntents {
-        host: config.get("MONGO_HOST", "127.0.0.1"),
-        port: config.get_int("MONGO_PORT", 27017),
-        user: config.get("MONGO_USER", "payments"),
-        password: config.get("MONGO_PASSWORD", "payments"),
-        database: config.get("MONGO_DATABASE", "payments"),
-    };
+    let repo = mongo_intents.new_intents(
+        config.get("MONGO_HOST", "127.0.0.1"),
+        config.get_int("MONGO_PORT", 27017),
+        config.get("MONGO_USER", "payments"),
+        config.get("MONGO_PASSWORD", "payments"),
+        config.get("MONGO_DATABASE", "payments"),
+        config.get_int("MONGO_POOL_SIZE", 8)
+    );
     match (mongo_intents.migrate(repo, 60)) {
         Result.Ok(_) => logs.info("payment", "", "database ready", []),
         Result.Err(e) => {
@@ -50,8 +51,15 @@ fn main() -> int {
     }
     let rayq_host = config.get("RAYQ_HOST", "127.0.0.1");
     let rayq_port = config.get_int("RAYQ_PORT", 7450);
-    let payments = new_payments(repo, card_simulator.new_card_simulator(), rayq_bus.new_rayq_bus(rayq_host, rayq_port));
-    let jobs = rpc.pool(rayq_host, rayq_port, 2);
+    let payments = new_payments(
+        repo,
+        card_simulator.new_card_simulator(),
+        rayq_bus.new_rayq_bus(rayq_host, rayq_port)
+    );
+    // Several workers charge concurrently: a charge is idempotent per intent (finish is a
+    // compare-and-set on its status).
+    let workers_n = config.get_int("PAYMENT_WORKERS", 4);
+    let jobs = rpc.pool(rayq_host, rayq_port, workers_n + 1);
 
     let _http = spawn(fn() {
         match (web.listen_graceful(fn() -> web.App { http_in.build(payments, secret) }, "0.0.0.0", http_port, 3000)) {
@@ -59,7 +67,12 @@ fn main() -> int {
             Result.Ok(_) => { },
         }
     });
-    let _worker = spawn(fn() { worker.work_forever(payments, jobs, 300); });
+    let idle_ms = config.get_int("QUEUE_IDLE_MS", 100);
+    for _ in 0..workers_n {
+        spawn(fn() {
+            worker.work_forever(payments, jobs, idle_ms);
+        });
+    }
     let listener = match (server.bind("0.0.0.0", grpc_port)) {
         Result.Ok(l) => l,
         Result.Err(e) => {
@@ -67,7 +80,12 @@ fn main() -> int {
             return 1;
         },
     };
-    logs.info("payment", "", "serving", [("grpc", to_string(grpc_port)), ("http", to_string(http_port))]);
+    logs.info(
+        "payment",
+        "",
+        "serving",
+        [("grpc", to_string(grpc_port)), ("http", to_string(http_port))]
+    );
     match (server.serve_router(listener, fn() -> Router { grpc_in.router(payments) })) {
         Result.Ok(_) => 0,
         Result.Err(e) => {

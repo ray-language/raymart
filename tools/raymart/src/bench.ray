@@ -285,9 +285,11 @@ fn step_table(md: [string], vus: int, sums: [stats.Summary]) {
                 + to_string(stats.f1(s.rps))
                 + " | "
                 + to_string(s.ok)
-                + " | "
-                + if (s.errors > 0) { "**${s.errors}** (${s.error_detail})" } else { "0" }
-                + " | ${stats.f1(s.mean_ms)} | ${stats.f1(s.p50_ms)} | ${stats.f1(s.p90_ms)} | ${stats.f1(s.p95_ms)} | ${stats.f1(s.p99_ms)} | ${stats.f1(s.max_ms)} |"
+                + " | " + if (s.errors > 0) {
+                "**${s.errors}** (${s.error_detail})"
+            } else {
+                "0"
+            } + " | ${stats.f1(s.mean_ms)} | ${stats.f1(s.p50_ms)} | ${stats.f1(s.p90_ms)} | ${stats.f1(s.p95_ms)} | ${stats.f1(s.p99_ms)} | ${stats.f1(s.max_ms)} |"
         );
     }
 }
@@ -476,8 +478,8 @@ fn ramp(e: Env, o: Options, rep: Report, scenario: string, overview: [string]) {
         var restocked = 0;
         if (scenario == "purchase") {
             // Top up to enough units that the stage cannot sell out (a purchase takes well
-            // over 300 ms), without piling stock up run after run.
-            let need = vus * o.duration_s * 4;
+            // over 100 ms), without piling stock up run after run.
+            let need = vus * o.duration_s * 10;
             restocked = restock(e, o.purchase_product, need - stock(e, o.purchase_product)).unwrap_or(
                 -1
             );
@@ -500,13 +502,11 @@ fn ramp(e: Env, o: Options, rep: Report, scenario: string, overview: [string]) {
         let back = recover(e);
         if (back < 0.0 || back > 3.0) {
             notes.push(
-                "- ⚠ after "
-                    + to_string(scenario)
-                    + " × "
-                    + to_string(vus)
-                    + " the system needed "
-                    + if (back < 0.0) { "more than 120" } else { stats.f1(back) }
-                    + " s to serve again"
+                "- ⚠ after " + to_string(scenario) + " × " + to_string(vus) + " the system needed " + if (back < 0.0) {
+                    "more than 120"
+                } else {
+                    stats.f1(back)
+                } + " s to serve again"
             );
         }
         step_table(md, vus, s.sums);
@@ -561,12 +561,11 @@ fn ramp(e: Env, o: Options, rep: Report, scenario: string, overview: [string]) {
             key = to_string(stats.f1(rps))
                 + " ok/s · worst p99 "
                 + to_string(stats.f1(worst))
-                + " ms · "
-                + if (errors == 0) {
-                    "no errors"
-                } else {
-                    "**${stats.f1(pct)} % errors** (${errors})"
-                };
+                + " ms · " + if (errors == 0) {
+                "no errors"
+            } else {
+                "**${stats.f1(pct)} % errors** (${errors})"
+            };
         }
         overview.push("| ${scenario} | ${vus} | ${key} |");
     }
@@ -732,14 +731,11 @@ pub fn run(av: [string]) -> int {
         head.push(l);
     }
     head.push("");
-    head.push(
-        "Invariants: "
-            + if (rep.failures.len() == 0) {
-                "all held ✓"
-            } else {
-                "**${rep.failures.len()} failed** ✗"
-            }
-    );
+    head.push("Invariants: " + if (rep.failures.len() == 0) {
+        "all held ✓"
+    } else {
+        "**${rep.failures.len()} failed** ✗"
+    });
     for l in body {
         head.push(l);
     }

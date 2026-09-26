@@ -39,19 +39,7 @@ fn delta(before: Map<string, float>, after: Map<string, float>, key: string) -> 
     after.get(key).unwrap_or(0.0) - before.get(key).unwrap_or(0.0)
 }
 
-const BUCKETS: [string] = [
-    "5",
-    "10",
-    "25",
-    "50",
-    "100",
-    "250",
-    "500",
-    "1000",
-    "2500",
-    "5000",
-    "+Inf"
-];
+const BUCKETS: [string] = ["5", "10", "25", "50", "100", "250", "500", "1000", "2500", "5000", "+Inf"];
 
 /// The smallest bucket bound whose cumulative count reaches `p`% of `total`.
 fn bucket_for(
@@ -92,17 +80,11 @@ pub fn diff(
         let count = delta(before, after, "raygate_upstream_ms_count" + sel);
         let sum = delta(before, after, "raygate_upstream_ms_sum" + sel);
         out.push(
-            RouteDelta {
-                route: r,
-                requests: requests as int,
-                upstream_errors: delta(before, after, "raygate_upstream_errors_total" + sel) as int,
-                rate_limited: limited as int,
-                breaker_fastfail: fastfail as int,
-                mean_ms: if (count > 0.0) { sum / count } else { 0.0 },
-                p50_le: bucket_for(before, after, r, count, 50),
-                p95_le: bucket_for(before, after, r, count, 95),
-                p99_le: bucket_for(before, after, r, count, 99)
-            }
+            RouteDelta { route: r, requests: requests as int, upstream_errors: delta(before, after, "raygate_upstream_errors_total" + sel) as int, rate_limited: limited as int, breaker_fastfail: fastfail as int, mean_ms: if (count > 0.0) {
+                sum / count
+            } else {
+                0.0
+            }, p50_le: bucket_for(before, after, r, count, 50), p95_le: bucket_for(before, after, r, count, 95), p99_le: bucket_for(before, after, r, count, 99) }
         );
     }
     out

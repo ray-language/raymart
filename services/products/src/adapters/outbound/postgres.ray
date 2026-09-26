@@ -1,8 +1,12 @@
-// PostgreSQL ProductRepository. Each operation opens its own connection and closes it — a
-// connection is never shared between the fibers that serve concurrent requests. Reservations
-// run in one transaction with `SELECT … FOR UPDATE`, so two orders racing for the last unit
-// cannot both win.
+// PostgreSQL ProductRepository over a pool of connections (common/pool): an operation checks a
+// connection out, and gives it back — or drops it if the wire failed. A connection is used by
+// one fiber at a time and survives the request, so the handshake (a backend process and a
+// SCRAM exchange) is paid once per connection, not once per query, and closed sockets do not
+// pile up in TIME_WAIT until the ephemeral ports run out (perf/README.md). Reservations run
+// in one transaction with `SELECT … FOR UPDATE`, so two orders racing for the last unit cannot
+// both win.
 import db/postgres;
+import common/pool;
 import std/crypto;
 import std/hex;
 import std/time;
@@ -15,6 +19,69 @@ pub struct PostgresProducts {
     user: string,
     password: string,
     database: string,
+    conns: Channel<PgSlot>,
+}
+
+/// A pool slot (common/pool.ray): an idle connection, or one to dial.
+pub enum PgSlot {
+    Ready(postgres.Conn),
+    Empty,
+}
+
+/// The repository with a pool of up to `pool_size` connections (dialed on demand).
+pub fn new_products(
+    host: string,
+    port: int,
+    user: string,
+    password: string,
+    database: string,
+    pool_size: int
+) -> PostgresProducts {
+    let n = if (pool_size < 1) { 1 } else { pool_size };
+    let slots: Channel<PgSlot> = Channel.bounded(n);
+    for _ in 0..n {
+        send(slots, PgSlot.Empty);
+    }
+    PostgresProducts {
+        host: host,
+        port: port,
+        user: user,
+        password: password,
+        database: database,
+        conns: slots
+    }
+}
+
+/// A checked-out connection, and whether it was reused (it may have gone stale while idle).
+struct PgLease {
+    conn: postgres.Conn,
+    reused: bool,
+}
+
+fn checkout(r: PostgresProducts) -> Result<PgLease, string> {
+    match (recv(r.conns)) {
+        Option.None => Result.Err("unavailable: products database: the pool is closed"),
+        Option.Some(slot) => match (slot) {
+            PgSlot.Ready(c) => Result.Ok(PgLease { conn: c, reused: true }),
+            PgSlot.Empty => match (open(r)) {
+                Result.Ok(c) => Result.Ok(PgLease { conn: c, reused: false }),
+                Result.Err(e) => {
+                    send(r.conns, PgSlot.Empty);
+                    Result.Err(e)
+                },
+            },
+        },
+    }
+}
+
+/// Gives `c` back after an operation; a wire error closes it and empties its slot instead.
+fn give_back(r: PostgresProducts, c: postgres.Conn, error: string) {
+    if (error == "" || pool.connection_ok(error)) {
+        send(r.conns, PgSlot.Ready(c));
+    } else {
+        postgres.disconnect(c);
+        send(r.conns, PgSlot.Empty);
+    }
 }
 
 fn nonce() -> string {
@@ -26,6 +93,34 @@ fn open(r: PostgresProducts) -> Result<postgres.Conn, string> {
         Result.Ok(c) => Result.Ok(c),
         Result.Err(e) => Result.Err("unavailable: products database: " + e),
     }
+}
+
+/// Runs `op` on a pooled connection. With `retry` (idempotent operations only), a reused
+/// connection that fails on the wire is replaced and `op` runs once more (common/pool.ray).
+fn with_conn<T>(
+    r: PostgresProducts,
+    retry: bool,
+    op: fn(postgres.Conn) -> Result<T, string>
+) -> Result<T, string> {
+    let lease = checkout(r)?;
+    let out = op(lease.conn);
+    let error = pool.error_of(out);
+    if (retry && pool.retry_on_fresh(error, lease.reused)) {
+        postgres.disconnect(lease.conn);
+        return match (open(r)) {
+            Result.Ok(c) => {
+                let again = op(c);
+                give_back(r, c, pool.error_of(again));
+                again
+            },
+            Result.Err(e) => {
+                send(r.conns, PgSlot.Empty);
+                Result.Err(e)
+            },
+        };
+    }
+    give_back(r, lease.conn, error);
+    out
 }
 
 fn to_int(s: string) -> int {
@@ -188,73 +283,74 @@ fn release_on(c: postgres.Conn, order_id: string) -> Result<int, string> {
     Result.Ok(rows.len())
 }
 
+fn restock_on(c: postgres.Conn, id: int, qty: int) -> Result<Option<Product>, string> {
+    let r = postgres.query(
+        c,
+        "UPDATE products SET stock = stock + $1 WHERE id = $2 RETURNING id, sku, name, price_cents, stock",
+        [to_string(qty), to_string(id)]
+    )?;
+    if (r.len() == 0) {
+        return Result.Ok(Option.None);
+    }
+    Result.Ok(Option.Some(row_to_product(r[0])))
+}
+
+fn find_on(c: postgres.Conn, id: int) -> Result<Option<Product>, string> {
+    let r = postgres.query(
+        c,
+        "SELECT id, sku, name, price_cents, stock FROM products WHERE id = $1",
+        [to_string(id)]
+    )?;
+    if (r.len() == 0) {
+        return Result.Ok(Option.None);
+    }
+    Result.Ok(Option.Some(row_to_product(r[0])))
+}
+
 impl ProductRepository for PostgresProducts {
     fn list(self) -> Result<[Product], string> {
-        let c = open(self)?;
-        let rows = postgres.query(
-            c,
-            "SELECT id, sku, name, price_cents, stock FROM products ORDER BY id",
-            []
-        );
-        postgres.disconnect(c);
-        Result.Ok(rows?.map(row_to_product))
+        with_conn(self, true, fn(c: postgres.Conn) -> Result<[Product], string> {
+            Result.Ok(
+                postgres.query(
+                    c,
+                    "SELECT id, sku, name, price_cents, stock FROM products ORDER BY id",
+                    []
+                )?.map(
+                    row_to_product
+                )
+            )
+        })
     }
 
     fn find(self, id: int) -> Result<Option<Product>, string> {
-        let c = open(self)?;
-        let rows = postgres.query(
-            c,
-            "SELECT id, sku, name, price_cents, stock FROM products WHERE id = $1",
-            [to_string(id)]
-        );
-        postgres.disconnect(c);
-        let r = rows?;
-        if (r.len() == 0) {
-            return Result.Ok(Option.None);
-        }
-        Result.Ok(Option.Some(row_to_product(r[0])))
+        with_conn(self, true, fn(c: postgres.Conn) -> Result<Option<Product>, string> { find_on(c, id) })
     }
 
     fn reserve(self, order_id: string, lines: [Line]) -> Result<[Reserved], string> {
-        let c = open(self)?;
-        let r = reserve_on(c, order_id, lines);
-        postgres.disconnect(c);
-        r
+        with_conn(self, true, fn(c: postgres.Conn) -> Result<[Reserved], string> { reserve_on(c, order_id, lines) })
     }
 
     fn commit(self, order_id: string) -> Result<int, string> {
-        let c = open(self)?;
-        let r = postgres.exec(
-            c,
-            "UPDATE reservations SET status = 'committed' WHERE order_id = $1 AND status = 'reserved'",
-            [order_id]
-        );
-        postgres.disconnect(c);
-        r
+        with_conn(self, true, fn(c: postgres.Conn) -> Result<int, string> {
+            postgres.exec(
+                c,
+                "UPDATE reservations SET status = 'committed' WHERE order_id = $1 AND status = 'reserved'",
+                [order_id]
+            )
+        })
     }
 
     fn release(self, order_id: string) -> Result<int, string> {
-        let c = open(self)?;
-        let r = release_on(c, order_id);
-        if (r.is_err()) {
-            let _ = postgres.exec(c, "ROLLBACK", []);
-        }
-        postgres.disconnect(c);
-        r
+        with_conn(self, true, fn(c: postgres.Conn) -> Result<int, string> {
+            let r = release_on(c, order_id);
+            if (r.is_err()) {
+                let _ = postgres.exec(c, "ROLLBACK", []);
+            }
+            r
+        })
     }
 
     fn restock(self, id: int, qty: int) -> Result<Option<Product>, string> {
-        let c = open(self)?;
-        let rows = postgres.query(
-            c,
-            "UPDATE products SET stock = stock + $1 WHERE id = $2 RETURNING id, sku, name, price_cents, stock",
-            [to_string(qty), to_string(id)]
-        );
-        postgres.disconnect(c);
-        let r = rows?;
-        if (r.len() == 0) {
-            return Result.Ok(Option.None);
-        }
-        Result.Ok(Option.Some(row_to_product(r[0])))
+        with_conn(self, false, fn(c: postgres.Conn) -> Result<Option<Product>, string> { restock_on(c, id, qty) })
     }
 }

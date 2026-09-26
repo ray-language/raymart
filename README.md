@@ -10,6 +10,7 @@ persistente. Todo corre en contenedores con `docker compose`, compilado a **bina
 make up      # construye y levanta todo; gateway en http://127.0.0.1:8088, dashboard en :8091
 make e2e     # 19 comprobaciones de punta a punta a través del gateway
 make chaos   # checkout con payment caído: el pedido espera y se paga cuando vuelve
+make bench   # carga creciente hasta 64 usuarios concurrentes, con invariantes (perf/README.md)
 ```
 
 ## Arquitectura
@@ -126,8 +127,10 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
 | `test` | tests unitarios de todos los proyectos raylang (sin contenedores) |
 | `test-it` | tests de integración de los adaptadores contra las bases en Docker |
 | `check-release` | compila y testea todo con la **release** de raylang que usan las imágenes |
-| `e2e` | escenarios de punta a punta a través del gateway |
+| `check-release-it` | los tests de integración con la release, desde un contenedor |
+| `e2e` | escenarios de punta a punta a través del gateway (el CLI nativo, dentro de la red) |
 | `chaos` | resiliencia: payment caído durante un checkout |
+| `chaos-db` | resiliencia: reinicia las cuatro bases de datos; el primer e2e de después debe pasar entero |
 | `trace ID=…` · `log-stats` | raylogs sobre los logs JSON |
 | `token USER_ID=…` | un JWT de desarrollo |
 | `bench` | prueba de carga: 1 → 8 → 32 → 64 usuarios virtuales × 15 s por escenario, invariantes bajo concurrencia, informe en `perf/results/` ([perf/README.md](perf/README.md)) |
@@ -137,21 +140,26 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
 
 | Qué | Verificado |
 |---|---|
-| Tests unitarios | common 7 · grpc 12 · products 10 · cart 7 · orders 14 · payment 10 — con el toolchain local y con la release 1.27.11 |
-| Integración | PostgreSQL 18: 3 (seis pedidos por la última unidad: gana uno) · raykv: 2 (con TTL) · MySQL 8.4: 3 (pedido + outbox atómicos) · MongoDB 8: 2 (cinco CreateIntent concurrentes: un intent) |
+| Tests unitarios | common 9 · grpc 12 · products 10 · cart 7 · orders 14 · payment 10 · tools 11 — con la release 1.27.11 |
+| Integración | PostgreSQL 18: 5 (seis pedidos por la última unidad: gana uno; conexiones matadas por el servidor) · raykv: 2 (con TTL) · MySQL 8.4: 4 (pedido + outbox atómicos; conexiones matadas) · MongoDB 8: 2 (cinco CreateIntent concurrentes: un intent) |
 | gRPC | contrato payment en proceso; interop con `grpcurl` (librería) |
-| Docker | las 11 piezas sanas; `make e2e` 19/19; `make chaos` pendiente → pagado; raywatch 11/11 en verde |
+| Docker | las 11 piezas sanas; `make e2e` 19/19; `make chaos` pendiente → pagado; `make chaos-db` 19/19 tras reiniciar las bases; raywatch 11/11 en verde |
+| Carga | 29 600 lecturas/s directas y 14 900 por el gateway, 146 compras/s de punta a punta con 64 usuarios; 0 errores y todas las invariantes ([perf/README.md](perf/README.md)) |
 
 ## Notas
 
-- **Una conexión de base de datos por operación.** Las fibras que atienden peticiones no
-  comparten heap; una conexión compartida entre ellas se corrompería.
+- **Pools de conexiones** en los adaptadores de salida (`libs/common/pool.ray`). Las fibras no
+  comparten heap, así que las conexiones viajan por un canal acotado: cada operación toma una,
+  la devuelve, o la cierra si el cable falló. Una conexión reutilizada que el servidor cerró
+  (un reinicio) se reemplaza y la operación idempotente se repite una vez. Tamaños:
+  `PG_POOL_SIZE`, `MYSQL_POOL_SIZE`, `MONGO_POOL_SIZE`, `RAYKV_POOL_SIZE`, `RPC_POOL_SIZE`.
 - **El estado vive en las bases de datos.** Los handlers gRPC y HTTP reciben una *copia* de lo
   que capturan (por conexión), así que nada en memoria del proceso es estado compartido.
 - **`libs/mongodb`** es una copia parcheada del cliente MongoDB de raylang (`db` 0.1.0): la
   original no puede autenticarse contra MongoDB 6 o posterior (verificado con 8.3). Se elimina cuando `db` publique el arreglo.
-- **Toolchain.** Las imágenes usan la release 1.27.11; `make check-release` garantiza que el
-  código no dependa de funciones aún no publicadas del toolchain local.
+- **Toolchain.** Las imágenes usan la release 1.27.11; `make check-release` y
+  `make check-release-it` corren los tests con ella en un contenedor, así que no dependen del
+  toolchain del host. `make test` y `make test-it` usan el `ray` local.
 - El JWT de desarrollo (`raymart-dev-secret-change-me`) está en `docker-compose.yml` y en
   `config/raygate.toml`: cámbialo en ambos (o `RAYMART_JWT_SECRET` + la config del gateway).
 

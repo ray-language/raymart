@@ -1,8 +1,9 @@
 # Rendimiento de raymart
 
 `make bench` somete el sistema a carga creciente, comprueba que las reglas de negocio
-aguantan la concurrencia y deja un informe en `perf/results/<fecha>/`. La
-[línea base](baseline.md) es la corrida de referencia de este documento.
+aguantan la concurrencia y deja un informe en `perf/results/<fecha>/`. Hay dos corridas de
+referencia: la [línea base](baseline.md) (hito 8, el diagnóstico) y
+[after-pools.md](after-pools.md) (hito 9, tras arreglar lo diagnosticado).
 
 ```bash
 make up            # el sistema arriba
@@ -52,7 +53,7 @@ make bench ARGS="--scenarios purchase,drain --stages 16,64 --duration 30"
   stock, todas se pagan, el producto termina en 0 y todos los VUs reciben el 409 de agotado.
   Después se devuelve el stock original.
 
-## Línea base (26 sep 2026)
+## Línea base (hito 8, 26 sep 2026)
 
 Apple M3 Pro, Docker Desktop con 6 CPUs y 15,6 GiB; todo en nativo con raylang 1.27.11.
 Informe completo: [baseline.md](baseline.md) (y [baseline.json](baseline.json)).
@@ -108,15 +109,70 @@ Con 1 VU, raygate añade ~0,4 ms por petición (4,1 ms frente a 3,7 ms). Con 32 
 techo un ~12 % (761 frente a 866 ok/s), porque también abre una conexión por petición hacia
 el upstream.
 
-## Qué haría después (medir → cambiar → volver a medir)
+## Hito 9: pools de conexiones, keep-alive y una saga sin esperas
 
-1. **Pools de conexiones como actores** en los adaptadores de salida: N fibras dueñas de una
-   conexión cada una, que atienden un canal compartido de operaciones. Las fibras no comparten
-   heap, así que el pool no puede ser un valor capturado. Es un cambio solo de adaptadores; el
-   hexágono no se toca. Debería eliminar el agotamiento de puertos y la mayor parte de la CPU
-   del catálogo.
-2. **raygate con keep-alive hacia los upstreams** (`http.connect` por upstream). Es un cambio en
-   el repo de raygate, que raymart consume como binario.
-3. **Relé del outbox**: repetir sin dormir mientras el lote venga lleno, reutilizar la conexión
-   gRPC y bajar el tick; y despertar a los consumidores con long-poll en vez de sondear cada
-   300 ms.
+Cada cambio se midió por separado con `scripts/bench.sh --scenarios …` antes de la corrida
+completa ([after-pools.md](after-pools.md)).
+
+| escenario, 64 VUs salvo indicación | línea base | hito 9 | |
+|---|---|---|---|
+| `browse-direct` (32 VUs) | 866 ok/s · p99 68,6 ms | **29 630 ok/s · p99 3,6 ms** | 34× |
+| `browse` por raygate | 266 ok/s, 58 % errores | **14 906 ok/s · p99 12,1 ms**, 0 errores | |
+| `cart` | 1 038 ok/s · p99 334 ms | **2 037 ok/s · p99 71 ms** | 2× |
+| `purchase` | 26,5 compras/s · hasta pagado p50 2,28 s | **145,8 compras/s · p50 0,42 s** | 5,5× |
+| `purchase` con 1 VU, hasta pagado p50 | 0,62 s | **0,21 s** | |
+| `drain` de 500 unidades | 24,5 s | **3,6 s** | 6,8× |
+| errores en toda la corrida | 18 595 (y 3 pausas de 65 s) | **0** | |
+
+Las invariantes siguen cumpliéndose en todas las etapas.
+
+### Qué cambió
+
+1. **Pools de conexiones en los cuatro adaptadores** (PostgreSQL, MySQL, MongoDB, raykv). Es
+   el patrón de `rpc.pool`: un canal acotado de slots por el que viajan las propias conexiones
+   (`libs/common/pool.ray` lo documenta). Las fibras no comparten heap, pero un socket pasado
+   por un canal es el mismo en todas. Un error del cable cierra la conexión y deja el slot
+   vacío, así que el pool se recupera solo tras una caída. Es un cambio solo de adaptadores: el
+   hexágono no se tocó. Tamaños por variable de entorno (`PG_POOL_SIZE`, `MYSQL_POOL_SIZE`,
+   `MONGO_POOL_SIZE`, `RAYKV_POOL_SIZE`, `RPC_POOL_SIZE`).
+2. **raygate reutiliza conexiones keep-alive** hacia cada upstream (ray-language/raygate#4,
+   `[server] upstream_pool`). Con 1 VU el catálogo por el gateway pasó de 1 525 a 2 282 ok/s.
+3. **Saga sin esperas**: el relé encadena lotes mientras vengan llenos (tick de 100 ms, lotes
+   de 50) sobre una conexión gRPC reutilizada; orders aplica resultados con 4 consumidores
+   concurrentes y payment cobra con 4 workers, porque ambos pasos son idempotentes. Los
+   consumidores en vacío sondean cada 100 ms en vez de 300.
+
+### Lo que se encontró por el camino
+
+- **Un pool de 16 conexiones a raykv para 64 peticiones concurrentes** hundía `cart × 64` (958
+  ok/s, p99 807 ms): las fibras esperaban turno. Con 64, 2 252 ok/s y p99 73 ms.
+- **`db/mysql` nunca compacta su búfer de lectura.** Con conexiones reutilizadas, orders pasó de
+  33 MiB a 1,7 GiB en un minuto, con la CPU al 350 %, y la saga cayó a 40 compras/s. Se esquiva
+  reiniciando el búfer al devolver la conexión (RAYLANG-FINDINGS #72); con eso orders se queda
+  en ~45 MiB y la saga sube a 146/s.
+- **El código de pool genérico no compila en nativo** (RAYLANG-FINDINGS #71). Pasaba los tests
+  en la VM, pero la imagen de products no se construía y la primera medición «con pools» era en
+  realidad de la imagen vieja. Desde entonces, cada medición va precedida de un build comprobado.
+
+### Y la resiliencia
+
+Un pool guarda conexiones que pueden caducar: tras reiniciar una base de datos, cada conexión
+del pool fallaba una vez delante de un usuario (16 en products, 64 en cart), porque el canal es
+FIFO y el pool solo descartaba una conexión después de fallar. Ahora una conexión **reutilizada**
+que falla por el cable se cierra y la operación se repite una vez en una conexión nueva (como
+hace `net/http` con keep-alive). Solo se hace con operaciones idempotentes: el alta de un pedido
+solo se repite si la transacción ni siquiera empezó, y `restock` nunca. Los tests de integración
+de PostgreSQL y MySQL matan las conexiones desde el servidor y fallan sin el reintento. `make
+chaos-db` reinicia las cuatro bases y exige que el siguiente e2e pase entero (19/19, tres veces
+seguidas). El rendimiento no cambió.
+
+### Límites que quedan
+
+- **Lecturas directas**: ~29 600 ok/s a 32 VUs, con products en ~2,3 núcleos y PostgreSQL en
+  ~1,4. Es el techo de la máquina (6 CPUs para Docker) más que del diseño.
+- **Por el gateway**: ~15 000 ok/s, con raygate en ~1,4 núcleos. Cada petición pasa dos veces
+  por su actor de control (admisión y métricas); es el siguiente sitio donde mirar.
+- **Carrito**: ~2 300 ok/s, con cart, raygate y raykv a ~1 núcleo cada uno. Un alta hace un rpc
+  a products y dos operaciones en raykv.
+- **Saga**: sigue escalando a 64 VUs (145,8 compras/s, colas con pico de 34/31) y ya está
+  limitada por la latencia: ~0,2 s por pedido, con el sondeo del cliente cada 200 ms incluido.

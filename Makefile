@@ -4,7 +4,12 @@ COMPOSE := docker compose
 RAY_PROJECTS := libs/common $(wildcard services/*) $(wildcard libs/grpc) $(wildcard tools/*)
 
 .DEFAULT_GOAL := help
-.PHONY: help up down build ps logs test test-it check-release e2e token chaos trace log-stats bench bench-quick
+
+# The test stores' published ports; raykv and rayq have no healthcheck (their images hold only
+# the binary), so `--wait` does not cover them: wait until every port accepts connections.
+TEST_PORTS := 55432 53306 57017 57379 57450
+WAIT_STORES = for port in $(TEST_PORTS); do i=0; until nc -z 127.0.0.1 $$port 2>/dev/null; do i=$$((i+1)); [ $$i -lt 60 ] || { echo "port $$port is not accepting connections" >&2; exit 1; }; sleep 0.5; done; done
+.PHONY: help up down build ps logs test test-it check-release-it check-release cli e2e token chaos chaos-db trace log-stats bench bench-quick
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
@@ -29,27 +34,46 @@ test: ## Unit tests of every raylang project (no containers needed)
 
 test-it: ## Adapter integration tests against the stores in Docker (published on 127.0.0.1 high ports)
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.test.yml up -d --wait postgres mysql mongo raykv rayq
+	@$(WAIT_STORES)
 	@set -e; for p in $(wildcard services/*); do echo "== $$p"; (cd $$p && RAYMART_IT=1 ray test </dev/null); done
+
+check-release-it: ## Integration tests with the RELEASE toolchain, from a container (stores via host.docker.internal)
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.test.yml up -d --wait postgres mysql mongo raykv rayq
+	@$(WAIT_STORES)
+	docker build -q -f docker/Dockerfile --target toolchain -t raymart-toolchain . >/dev/null
+	@set -e; for p in $(wildcard services/*); do echo "== $$p"; docker run --rm -v "$$PWD":/src -w /src/$$p -e RAYMART_IT=1 -e RAYMART_IT_HOST=host.docker.internal raymart-toolchain sh -c 'ray fetch >/dev/null && ray test </dev/null'; done
 
 check-release: ## Build + test every raylang project with the RELEASE toolchain the images use
 	docker build -q -f docker/Dockerfile --target toolchain -t raymart-toolchain . >/dev/null
 	@set -e; for p in $(RAY_PROJECTS); do echo "== $$p"; docker run --rm -v "$$PWD":/src -w /src/$$p raymart-toolchain sh -c 'ray fetch >/dev/null && ray test </dev/null'; done
 
-e2e: ## End-to-end scenarios through the gateway (needs `make up`)
-	cd tools/raymart && ray run -- e2e http://127.0.0.1:8088
+# The raymart CLI (tools/raymart) as a native binary inside the compose network, like every
+# other raymart program: no host toolchain needed.
+CLI := $(COMPOSE) --progress quiet --profile bench run --rm -T --no-deps bench
 
-token: ## A development JWT: make token USER_ID=ada
-	@cd tools/raymart && ray run -- token $(or $(USER_ID),$(USER))
+cli: ## Build the raymart CLI image (e2e, token, chaos and bench use it)
+	@$(COMPOSE) --progress quiet --profile bench build -q bench
 
-chaos: ## Resilience: checkout while payment is down; the order is paid once it is back
-	@set -e; cd tools/raymart; \
-	user=chaos-$$$$; \
-	(cd ../.. && $(COMPOSE) stop payment >/dev/null); \
-	id=$$(ray run -- order $$user 5 1 4242); echo "order $$id placed while payment is down"; \
-	sleep 4; echo "after 4 s: $$(ray run -- status $$user $$id)"; \
-	(cd ../.. && $(COMPOSE) start payment >/dev/null); echo "payment is back"; \
-	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do s=$$(ray run -- status $$user $$id); [ "$$s" = "paid" ] && break; sleep 1; done; \
+e2e: cli ## End-to-end scenarios through the gateway (needs `make up`)
+	@$(CLI) e2e http://raygate:8080
+
+token: cli ## A development JWT: make token USER_ID=ada
+	@$(CLI) token $(or $(USER_ID),$(USER))
+
+chaos: cli ## Resilience: checkout while payment is down; the order is paid once it is back
+	@set -e; user=chaos-$$$$; \
+	$(COMPOSE) stop payment >/dev/null; \
+	id=$$($(CLI) order $$user 5 1 4242); echo "order $$id placed while payment is down"; \
+	sleep 4; echo "after 4 s: $$($(CLI) status $$user $$id)"; \
+	$(COMPOSE) start payment >/dev/null; echo "payment is back"; \
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do s=$$($(CLI) status $$user $$id); [ "$$s" = "paid" ] && break; sleep 1; done; \
 	echo "after the restart: $$s"; [ "$$s" = "paid" ]
+
+chaos-db: cli ## Resilience: restart every datastore; the first e2e run afterwards must pass whole
+	@$(COMPOSE) restart postgres mysql mongo raykv >/dev/null
+	@$(COMPOSE) up -d --wait postgres mysql mongo raykv >/dev/null 2>&1
+	@echo "datastores restarted: the services' pooled connections are all stale"
+	@$(CLI) e2e http://raygate:8080
 
 trace: ## Follow one request across every service: make trace ID=<32-hex trace id>
 	@$(COMPOSE) logs --no-log-prefix products cart orders payment 2>/dev/null | grep '^{' \

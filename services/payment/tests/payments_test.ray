@@ -7,10 +7,19 @@ import adapters/outbound/card_simulator;
 import adapters/inbound/worker;
 
 fn fixture() -> Payments<memory.MemoryIntents, card_simulator.CardSimulator, memory.MemoryBus> {
-    new_payments(memory.new_memory_intents(), card_simulator.new_card_simulator(), memory.new_memory_bus())
+    new_payments(
+        memory.new_memory_intents(),
+        card_simulator.new_card_simulator(),
+        memory.new_memory_bus()
+    )
 }
 
-fn intent(p: Payments<memory.MemoryIntents, card_simulator.CardSimulator, memory.MemoryBus>, id: string, order: string, card: string) -> Intent {
+fn intent(
+    p: Payments<memory.MemoryIntents, card_simulator.CardSimulator, memory.MemoryBus>,
+    id: string,
+    order: string,
+    card: string
+) -> Intent {
     match (create_intent(p, id, order, "ada", 1990, "USD", card, 1, "tp")) {
         Result.Ok(i) => i,
         Result.Err(e) => panic(e),
@@ -37,17 +46,20 @@ fn an_intent_starts_processing_and_queues_its_charge() {
 fn one_intent_per_order() {
     let p = fixture();
     let a = intent(p, "pi_1", "o1", "4242");
-    let b = intent(p, "pi_2", "o1", "4242"); // the relay retried
+    let b = intent(p, "pi_2", "o1", "4242");  // the relay retried
     assert_eq(b.id, a.id);
     assert_eq(p.repo.intents.len(), 1);
-    assert_eq(p.bus.jobs.len(), 2); // re-enqueued while processing; the worker is idempotent
+    assert_eq(p.bus.jobs.len(), 2);  // re-enqueued while processing; the worker is idempotent
 }
 
 @test
 fn invalid_intents_are_refused() {
     let p = fixture();
     assert_eq(status_of(create_intent(p, "x", "o", "ada", 0, "USD", "4242", 1, "")), "invalid");
-    assert_eq(status_of(create_intent(p, "x", "o", "ada", 10, "DOLLARS", "4242", 1, "")), "invalid");
+    assert_eq(
+        status_of(create_intent(p, "x", "o", "ada", 10, "DOLLARS", "4242", 1, "")),
+        "invalid"
+    );
     assert_eq(status_of(create_intent(p, "x", "", "ada", 10, "USD", "4242", 1, "")), "invalid");
 }
 
@@ -59,9 +71,15 @@ fn charges_follow_the_test_cards() {
     let _ = intent(p, "poor", "o3", "0003");
     assert_eq(status_of(process_charge(p, "ok", "")), SUCCEEDED);
     assert_eq(status_of(process_charge(p, "no", "")), FAILED);
-    assert_eq(match (get_intent(p, "poor")) { Result.Ok(i) => i.reason, Result.Err(_) => "" }, "");
+    assert_eq(match (get_intent(p, "poor")) {
+        Result.Ok(i) => i.reason,
+        Result.Err(_) => "",
+    }, "");
     assert_eq(status_of(process_charge(p, "poor", "")), FAILED);
-    assert_eq(match (get_intent(p, "poor")) { Result.Ok(i) => i.reason, Result.Err(_) => "" }, "insufficient funds");
+    assert_eq(match (get_intent(p, "poor")) {
+        Result.Ok(i) => i.reason,
+        Result.Err(_) => "",
+    }, "insufficient funds");
     assert(p.bus.results.contains("payment.succeeded o1"));
     assert(p.bus.results.contains("payment.failed o2"));
 }
@@ -72,7 +90,7 @@ fn a_repeated_charge_republishes_without_charging_again() {
     let _ = intent(p, "ok", "o1", "4242");
     let _ = process_charge(p, "ok", "");
     let _ = process_charge(p, "ok", "");
-    assert_eq(p.bus.results.len(), 2); // the result again, in case the first was lost
+    assert_eq(p.bus.results.len(), 2);  // the result again, in case the first was lost
     assert_eq(status_of(get_intent(p, "ok")), SUCCEEDED);
 }
 
@@ -96,9 +114,9 @@ fn the_worker_acks_nacks_and_drops() {
     let _ = intent(p, "ok", "o1", "4242");
     let _ = intent(p, "flaky", "o2", "0004");
     assert(worker.handle_job(p, job("ok")));
-    assert(!worker.handle_job(p, job("flaky"))); // nack: retried later
-    assert(worker.handle_job(p, job("ghost"))); // unknown intent: dropped
+    assert(!worker.handle_job(p, job("flaky")));  // nack: retried later
+    assert(worker.handle_job(p, job("ghost")));  // unknown intent: dropped
     assert(worker.handle_job(p, "garbage"));
     p.bus.down[0] = true;
-    assert(!worker.handle_job(p, job("ok"))); // could not publish: retry
+    assert(!worker.handle_job(p, job("ok")));  // could not publish: retry
 }

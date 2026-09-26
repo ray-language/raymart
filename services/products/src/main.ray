@@ -30,13 +30,14 @@ fn main() -> int {
         return health(http_port);
     }
 
-    let repo = postgres.PostgresProducts {
-        host: config.get("PG_HOST", "127.0.0.1"),
-        port: config.get_int("PG_PORT", 5432),
-        user: config.get("PG_USER", "products"),
-        password: config.get("PG_PASSWORD", "products"),
-        database: config.get("PG_DATABASE", "products")
-    };
+    let repo = postgres.new_products(
+        config.get("PG_HOST", "127.0.0.1"),
+        config.get_int("PG_PORT", 5432),
+        config.get("PG_USER", "products"),
+        config.get("PG_PASSWORD", "products"),
+        config.get("PG_DATABASE", "products"),
+        config.get_int("PG_POOL_SIZE", 16)
+    );
     match (postgres.migrate(repo, 30)) {
         Result.Ok(_) => logs.info("products", "", "database ready", []),
         Result.Err(e) => {
