@@ -1,0 +1,86 @@
+// The catalog's domain: products, the lines of a stock reservation, and the rules that do
+// not depend on where products are stored. Errors are "<code>: <message>" strings; the
+// code (not_found, invalid, out_of_stock, …) is what the adapters map to HTTP or rpc.
+import std/json;
+
+pub struct Product {
+    id: int,
+    sku: string,
+    name: string,
+    price_cents: int,
+    stock: int,
+}
+
+/// One line of a reservation: a product and how many units.
+pub struct Line {
+    product_id: int,
+    qty: int,
+}
+
+/// A reserved line with the price it was reserved at (orders keeps that price).
+pub struct Reserved {
+    product_id: int,
+    name: string,
+    price_cents: int,
+    qty: int,
+}
+
+/// A reservation must name at least one product, with a positive quantity, once.
+pub fn validate_lines(lines: [Line]) -> Result<int, string> {
+    if (lines.len() == 0) {
+        return Result.Err("invalid: a reservation needs at least one line");
+    }
+    var seen: [int] = [];
+    for l in lines {
+        if (l.qty <= 0) {
+            return Result.Err("invalid: quantity must be positive (product ${l.product_id})");
+        }
+        if (seen.contains(l.product_id)) {
+            return Result.Err("invalid: product ${l.product_id} appears twice");
+        }
+        seen.push(l.product_id);
+    }
+    Result.Ok(lines.len())
+}
+
+/// Whether `p` has stock for `qty` more units.
+pub fn has_stock(p: Product, qty: int) -> bool {
+    p.stock >= qty
+}
+
+pub fn to_json(p: Product) -> json.Json {
+    let m: Map<string, json.Json> = Map.new();
+    m.insert("id", json.Json.JNum(p.id as float));
+    m.insert("sku", json.Json.JStr(p.sku));
+    m.insert("name", json.Json.JStr(p.name));
+    m.insert("price_cents", json.Json.JNum(p.price_cents as float));
+    m.insert("stock", json.Json.JNum(p.stock as float));
+    json.Json.JObject(m)
+}
+
+pub fn reserved_to_json(r: Reserved) -> json.Json {
+    let m: Map<string, json.Json> = Map.new();
+    m.insert("product_id", json.Json.JNum(r.product_id as float));
+    m.insert("name", json.Json.JStr(r.name));
+    m.insert("price_cents", json.Json.JNum(r.price_cents as float));
+    m.insert("qty", json.Json.JNum(r.qty as float));
+    json.Json.JObject(m)
+}
+
+/// Parses `[{"product_id": 1, "qty": 2}, …]`.
+pub fn lines_from_json(j: json.Json) -> Result<[Line], string> {
+    let items = match (json.as_array(j)) {
+        Option.Some(a) => a,
+        Option.None => return Result.Err("invalid: lines must be an array"),
+    };
+    var out: [Line] = [];
+    for it in items {
+        let pid = json.get_int(it, "product_id");
+        let qty = json.get_int(it, "qty");
+        match (pid) {
+            Option.Some(p) => out.push(Line { product_id: p, qty: qty.unwrap_or(0) }),
+            Option.None => return Result.Err("invalid: every line needs a product_id"),
+        }
+    }
+    Result.Ok(out)
+}

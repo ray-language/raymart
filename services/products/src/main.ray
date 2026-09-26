@@ -1,0 +1,63 @@
+// products — the catalog and its stock. Composition root: reads the configuration, picks the
+// adapters (PostgreSQL behind the repository port) and starts the two inbound adapters, HTTP
+// for the public API and rpc for the other services.
+//
+//   products            serve (HTTP on HTTP_PORT, rpc on RPC_PORT)
+//   products health     exit 0 if this container's HTTP answers /health (the healthcheck)
+import web/framework as web;
+import rpc/rpc;
+import net/http;
+import std/json;
+import common/config;
+import common/logs;
+from application/catalog import new_catalog;
+import adapters/outbound/postgres;
+import adapters/inbound/http as http_in;
+import adapters/inbound/rpc as rpc_in;
+
+fn health(port: int) -> int {
+    match (http.fetch("http://127.0.0.1:${port}/health")) {
+        Result.Ok(r) => if (r.status == 200) { 0 } else { 1 },
+        Result.Err(_) => 1,
+    }
+}
+
+fn main() -> int {
+    let http_port = config.get_int("HTTP_PORT", 8080);
+    let rpc_port = config.get_int("RPC_PORT", 9000);
+    let av = args();
+    if (av.len() > 0 && av[0] == "health") {
+        return health(http_port);
+    }
+
+    let repo = postgres.PostgresProducts {
+        host: config.get("PG_HOST", "127.0.0.1"),
+        port: config.get_int("PG_PORT", 5432),
+        user: config.get("PG_USER", "products"),
+        password: config.get("PG_PASSWORD", "products"),
+        database: config.get("PG_DATABASE", "products"),
+    };
+    match (postgres.migrate(repo, 30)) {
+        Result.Ok(_) => logs.info("products", "", "database ready", []),
+        Result.Err(e) => {
+            logs.error("products", "", "database unavailable", [("error", e)]);
+            return 1;
+        },
+    }
+    let catalog = new_catalog(repo);
+
+    let _http = spawn(fn() {
+        match (web.listen_graceful(fn() -> web.App { http_in.build(catalog) }, "0.0.0.0", http_port, 3000)) {
+            Result.Err(e) => logs.error("products", "", "http server stopped", [("error", e)]),
+            Result.Ok(_) => { },
+        }
+    });
+    logs.info("products", "", "serving", [("http", to_string(http_port)), ("rpc", to_string(rpc_port))]);
+    match (rpc.serve_graceful("0.0.0.0", rpc_port, 3000, fn(req: rpc.Req) -> Result<json.Json, string> { rpc_in.handle(catalog, req) })) {
+        Result.Ok(_) => 0,
+        Result.Err(e) => {
+            logs.error("products", "", "rpc server stopped", [("error", e)]);
+            1
+        },
+    }
+}

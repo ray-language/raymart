@@ -1,0 +1,62 @@
+// The catalog's internal face for the other services (packages/rpc):
+//   products.get      {id}                    → product
+//   products.reserve  {order_id, lines}       → {items: [{product_id, name, price_cents, qty}]}
+//   products.commit   {order_id}              → {lines}
+//   products.release  {order_id}              → {lines}
+// Errors travel as "<code>: <message>", so callers can tell out_of_stock from a failure.
+import rpc/rpc;
+import std/json;
+import common/logs;
+import common/tracing;
+from domain/ports import ProductRepository;
+from domain/product import to_json, reserved_to_json, lines_from_json;
+from application/catalog import Catalog, get_product, reserve_stock, commit_reservation, release_reservation;
+
+fn str_param(req: rpc.Req, key: string) -> Result<string, string> {
+    match (json.get_string(req.params, key)) {
+        Option.Some(s) => Result.Ok(s),
+        Option.None => Result.Err("invalid: missing param '${key}'"),
+    }
+}
+
+fn count(n: int) -> json.Json {
+    let m: Map<string, json.Json> = Map.new();
+    m.insert("lines", json.Json.JNum(n as float));
+    json.Json.JObject(m)
+}
+
+pub fn handle<R: ProductRepository>(catalog: Catalog<R>, req: rpc.Req) -> Result<json.Json, string> {
+    let r = dispatch(catalog, req);
+    match (r) {
+        Result.Err(e) => logs.warn("products", tracing.trace_id(req.traceparent), "rpc failed", [("method", req.method), ("error", e)]),
+        Result.Ok(_) => logs.info("products", tracing.trace_id(req.traceparent), "rpc", [("method", req.method)]),
+    }
+    r
+}
+
+fn dispatch<R: ProductRepository>(catalog: Catalog<R>, req: rpc.Req) -> Result<json.Json, string> {
+    if (req.method == "products.get") {
+        match (json.get_int(req.params, "id")) {
+            Option.Some(id) => return Result.Ok(to_json(get_product(catalog, id)?)),
+            Option.None => return Result.Err("invalid: missing param 'id'"),
+        }
+    }
+    if (req.method == "products.reserve") {
+        let order_id = str_param(req, "order_id")?;
+        let lines = match (json.member(req.params, "lines")) {
+            Option.Some(l) => lines_from_json(l)?,
+            Option.None => return Result.Err("invalid: missing param 'lines'"),
+        };
+        let reserved = reserve_stock(catalog, order_id, lines)?;
+        let m: Map<string, json.Json> = Map.new();
+        m.insert("items", json.Json.JArray(reserved.map(reserved_to_json)));
+        return Result.Ok(json.Json.JObject(m));
+    }
+    if (req.method == "products.commit") {
+        return Result.Ok(count(commit_reservation(catalog, str_param(req, "order_id")?)?));
+    }
+    if (req.method == "products.release") {
+        return Result.Ok(count(release_reservation(catalog, str_param(req, "order_id")?)?));
+    }
+    Result.Err("invalid: unknown method ${req.method}")
+}

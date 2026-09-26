@@ -1,0 +1,15 @@
+// The catalog's outbound port. Adapters (PostgreSQL, in-memory) implement it; the use cases
+// only ever see this trait.
+from domain/product import Product, Line, Reserved;
+
+pub trait ProductRepository {
+    fn list(self) -> Result<[Product], string>;
+    fn find(self, id: int) -> Result<Option<Product>, string>;
+    /// All-or-nothing and idempotent per `order_id`: every line is reserved or none is, and
+    /// reserving the same order again returns the existing reservation without touching stock.
+    fn reserve(self, order_id: string, lines: [Line]) -> Result<[Reserved], string>;
+    /// Makes a reservation final (the order was paid): a later `release` is then a no-op.
+    fn commit(self, order_id: string) -> Result<int, string>;
+    /// Returns the reserved units to stock (the order was cancelled). Idempotent.
+    fn release(self, order_id: string) -> Result<int, string>;
+}

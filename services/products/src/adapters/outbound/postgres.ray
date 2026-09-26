@@ -1,0 +1,190 @@
+// PostgreSQL ProductRepository. Each operation opens its own connection and closes it — a
+// connection is never shared between the fibers that serve concurrent requests. Reservations
+// run in one transaction with `SELECT … FOR UPDATE`, so two orders racing for the last unit
+// cannot both win.
+import db/postgres;
+import std/crypto;
+import std/hex;
+import std/time;
+from domain/ports import ProductRepository;
+from domain/product import Product, Line, Reserved;
+
+pub struct PostgresProducts {
+    host: string,
+    port: int,
+    user: string,
+    password: string,
+    database: string,
+}
+
+fn nonce() -> string {
+    hex.hex_encode(crypto.random_bytes(18))
+}
+
+fn open(r: PostgresProducts) -> Result<postgres.Conn, string> {
+    match (postgres.connect(r.host, r.port, r.user, r.password, r.database, nonce())) {
+        Result.Ok(c) => Result.Ok(c),
+        Result.Err(e) => Result.Err("unavailable: products database: " + e),
+    }
+}
+
+fn to_int(s: string) -> int {
+    parse_int(s).unwrap_or(0)
+}
+
+fn row_to_product(row: [string]) -> Product {
+    Product { id: to_int(row[0]), sku: row[1], name: row[2], price_cents: to_int(row[3]), stock: to_int(row[4]) }
+}
+
+/// Creates the schema if needed and seeds the catalog on an empty database. Retries while the
+/// database is still starting (up to `attempts` seconds).
+pub fn migrate(r: PostgresProducts, attempts: int) -> Result<int, string> {
+    var last = "";
+    for _ in 0..attempts {
+        match (open(r)) {
+            Result.Ok(c) => {
+                let res = migrate_on(c);
+                postgres.disconnect(c);
+                return res;
+            },
+            Result.Err(e) => {
+                last = e;
+                time.sleep(1000);
+            },
+        }
+    }
+    Result.Err(last)
+}
+
+fn migrate_on(c: postgres.Conn) -> Result<int, string> {
+    postgres.exec(c, `CREATE TABLE IF NOT EXISTS products (
+        id SERIAL PRIMARY KEY,
+        sku TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
+        stock INTEGER NOT NULL CHECK (stock >= 0))`, [])?;
+    postgres.exec(c, `CREATE TABLE IF NOT EXISTS reservations (
+        order_id TEXT NOT NULL,
+        product_id INTEGER NOT NULL REFERENCES products(id),
+        name TEXT NOT NULL,
+        price_cents INTEGER NOT NULL,
+        qty INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        PRIMARY KEY (order_id, product_id))`, [])?;
+    let count = postgres.query(c, "SELECT count(*) FROM products", [])?;
+    if (to_int(count[0][0]) == 0) {
+        for p in seed() {
+            postgres.exec(c, "INSERT INTO products (sku, name, price_cents, stock) VALUES ($1, $2, $3, $4)", [p.0, p.1, to_string(p.2), to_string(p.3)])?;
+        }
+    }
+    Result.Ok(0)
+}
+
+fn seed() -> [(string, string, int, int)] {
+    [
+        ("TR-808", "Rhythm Composer TR-808", 129900, 5),
+        ("TB-303", "Bass Line TB-303", 89900, 8),
+        ("SH-101", "Monophonic Synthesizer SH-101", 64900, 12),
+        ("JUNO-60", "Polyphonic Synthesizer Juno-60", 159900, 3),
+        ("CABLE-TRS", "TRS patch cable, 1 m", 990, 200),
+        ("HEADPHONES", "Studio headphones", 12900, 40),
+    ]
+}
+
+fn rollback(c: postgres.Conn, e: string) -> Result<[Reserved], string> {
+    let _ = postgres.exec(c, "ROLLBACK", []);
+    Result.Err(e)
+}
+
+fn reserve_on(c: postgres.Conn, order_id: string, lines: [Line]) -> Result<[Reserved], string> {
+    postgres.exec(c, "BEGIN", [])?;
+    let existing = postgres.query(c, "SELECT product_id, name, price_cents, qty FROM reservations WHERE order_id = $1 ORDER BY product_id", [order_id])?;
+    if (existing.len() > 0) {
+        postgres.exec(c, "COMMIT", [])?;
+        var out: [Reserved] = [];
+        for row in existing {
+            out.push(Reserved { product_id: to_int(row[0]), name: row[1], price_cents: to_int(row[2]), qty: to_int(row[3]) });
+        }
+        return Result.Ok(out);
+    }
+    var out: [Reserved] = [];
+    for l in lines {
+        let rows = match (postgres.query(c, "SELECT id, sku, name, price_cents, stock FROM products WHERE id = $1 FOR UPDATE", [to_string(l.product_id)])) {
+            Result.Ok(r) => r,
+            Result.Err(e) => return rollback(c, e),
+        };
+        if (rows.len() == 0) {
+            return rollback(c, "not_found: no product ${l.product_id}");
+        }
+        let p = row_to_product(rows[0]);
+        if (p.stock < l.qty) {
+            return rollback(c, "out_of_stock: product ${p.id} has ${p.stock} left");
+        }
+        match (postgres.exec(c, "UPDATE products SET stock = stock - $1 WHERE id = $2", [to_string(l.qty), to_string(p.id)])) {
+            Result.Ok(_) => { },
+            Result.Err(e) => return rollback(c, e),
+        }
+        match (postgres.exec(c, "INSERT INTO reservations (order_id, product_id, name, price_cents, qty, status) VALUES ($1, $2, $3, $4, $5, 'reserved')", [order_id, to_string(p.id), p.name, to_string(p.price_cents), to_string(l.qty)])) {
+            Result.Ok(_) => { },
+            Result.Err(e) => return rollback(c, e),
+        }
+        out.push(Reserved { product_id: p.id, name: p.name, price_cents: p.price_cents, qty: l.qty });
+    }
+    postgres.exec(c, "COMMIT", [])?;
+    Result.Ok(out)
+}
+
+fn release_on(c: postgres.Conn, order_id: string) -> Result<int, string> {
+    postgres.exec(c, "BEGIN", [])?;
+    let rows = postgres.query(c, "SELECT product_id, qty FROM reservations WHERE order_id = $1 AND status = 'reserved' FOR UPDATE", [order_id])?;
+    for row in rows {
+        postgres.exec(c, "UPDATE products SET stock = stock + $1 WHERE id = $2", [row[1], row[0]])?;
+    }
+    postgres.exec(c, "UPDATE reservations SET status = 'released' WHERE order_id = $1 AND status = 'reserved'", [order_id])?;
+    postgres.exec(c, "COMMIT", [])?;
+    Result.Ok(rows.len())
+}
+
+impl ProductRepository for PostgresProducts {
+    fn list(self) -> Result<[Product], string> {
+        let c = open(self)?;
+        let rows = postgres.query(c, "SELECT id, sku, name, price_cents, stock FROM products ORDER BY id", []);
+        postgres.disconnect(c);
+        Result.Ok(rows?.map(row_to_product))
+    }
+
+    fn find(self, id: int) -> Result<Option<Product>, string> {
+        let c = open(self)?;
+        let rows = postgres.query(c, "SELECT id, sku, name, price_cents, stock FROM products WHERE id = $1", [to_string(id)]);
+        postgres.disconnect(c);
+        let r = rows?;
+        if (r.len() == 0) {
+            return Result.Ok(Option.None);
+        }
+        Result.Ok(Option.Some(row_to_product(r[0])))
+    }
+
+    fn reserve(self, order_id: string, lines: [Line]) -> Result<[Reserved], string> {
+        let c = open(self)?;
+        let r = reserve_on(c, order_id, lines);
+        postgres.disconnect(c);
+        r
+    }
+
+    fn commit(self, order_id: string) -> Result<int, string> {
+        let c = open(self)?;
+        let r = postgres.exec(c, "UPDATE reservations SET status = 'committed' WHERE order_id = $1 AND status = 'reserved'", [order_id]);
+        postgres.disconnect(c);
+        r
+    }
+
+    fn release(self, order_id: string) -> Result<int, string> {
+        let c = open(self)?;
+        let r = release_on(c, order_id);
+        if (r.is_err()) {
+            let _ = postgres.exec(c, "ROLLBACK", []);
+        }
+        postgres.disconnect(c);
+        r
+    }
+}

@@ -4,7 +4,7 @@ COMPOSE := docker compose
 RAY_PROJECTS := libs/common $(wildcard services/*) $(wildcard libs/grpc) $(wildcard tools/*)
 
 .DEFAULT_GOAL := help
-.PHONY: help up down build ps logs test
+.PHONY: help up down build ps logs test test-it
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
@@ -26,3 +26,7 @@ logs: ## Follow the logs of every container
 
 test: ## Unit tests of every raylang project (no containers needed)
 	@set -e; for p in $(RAY_PROJECTS); do echo "== $$p"; (cd $$p && ray test </dev/null); done
+
+test-it: ## Adapter integration tests against the stores in Docker (published on 127.0.0.1 high ports)
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.test.yml up -d --wait postgres mysql mongo raykv rayq
+	@set -e; for p in $(wildcard services/*); do echo "== $$p"; (cd $$p && RAYMART_IT=1 ray test </dev/null); done

@@ -1,0 +1,14 @@
+# Integration-test override: publishes the stores on 127.0.0.1 only, on high ports that do not
+# collide with local databases, so the adapter tests on the host can reach them.
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --wait postgres mysql mongo raykv rayq
+services:
+  postgres:
+    ports: ["127.0.0.1:55432:5432"]
+  mysql:
+    ports: ["127.0.0.1:53306:3306"]
+  mongo:
+    ports: ["127.0.0.1:57017:27017"]
+  raykv:
+    ports: ["127.0.0.1:57379:7379"]
+  rayq:
+    ports: ["127.0.0.1:57450:7450"]

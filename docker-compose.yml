@@ -56,6 +56,25 @@ services:
     command: ["serve", "--bind", "0.0.0.0", "--port", "7450", "--dir", "/data"]
     volumes: [rayq-data:/data]
 
+  # ---- services (hexagonal APIs) ----
+  products:
+    build:
+      <<: *raylang-build
+      args: { APP_DIR: services/products }
+    environment:
+      PG_HOST: postgres
+      PG_USER: products
+      PG_PASSWORD: products
+      PG_DATABASE: products
+      HTTP_PORT: "8080"
+      RPC_PORT: "9000"
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/app", "health"]
+      interval: 3s
+      retries: 20
+
 volumes:
   postgres-data:
   mysql-data:
