@@ -19,13 +19,7 @@ pub struct PostgresProducts {
     user: string,
     password: string,
     database: string,
-    conns: Channel<PgSlot>,
-}
-
-/// A pool slot (common/pool.ray): an idle connection, or one to dial.
-pub enum PgSlot {
-    Ready(postgres.Conn),
-    Empty,
+    conns: pool.Pool<postgres.Conn>,
 }
 
 /// The repository with a pool of up to `pool_size` connections (dialed on demand).
@@ -37,50 +31,13 @@ pub fn new_products(
     database: string,
     pool_size: int
 ) -> PostgresProducts {
-    let n = if (pool_size < 1) { 1 } else { pool_size };
-    let slots: Channel<PgSlot> = Channel.bounded(n);
-    for _ in 0..n {
-        send(slots, PgSlot.Empty);
-    }
     PostgresProducts {
         host: host,
         port: port,
         user: user,
         password: password,
         database: database,
-        conns: slots
-    }
-}
-
-/// A checked-out connection, and whether it was reused (it may have gone stale while idle).
-struct PgLease {
-    conn: postgres.Conn,
-    reused: bool,
-}
-
-fn checkout(r: PostgresProducts) -> Result<PgLease, string> {
-    match (recv(r.conns)) {
-        Option.None => Result.Err("unavailable: products database: the pool is closed"),
-        Option.Some(slot) => match (slot) {
-            PgSlot.Ready(c) => Result.Ok(PgLease { conn: c, reused: true }),
-            PgSlot.Empty => match (open(r)) {
-                Result.Ok(c) => Result.Ok(PgLease { conn: c, reused: false }),
-                Result.Err(e) => {
-                    send(r.conns, PgSlot.Empty);
-                    Result.Err(e)
-                },
-            },
-        },
-    }
-}
-
-/// Gives `c` back after an operation; a wire error closes it and empties its slot instead.
-fn give_back(r: PostgresProducts, c: postgres.Conn, error: string) {
-    if (error == "" || pool.connection_ok(error)) {
-        send(r.conns, PgSlot.Ready(c));
-    } else {
-        postgres.disconnect(c);
-        send(r.conns, PgSlot.Empty);
+        conns: pool.new_pool(pool_size)
     }
 }
 
@@ -102,25 +59,9 @@ fn with_conn<T>(
     retry: bool,
     op: fn(postgres.Conn) -> Result<T, string>
 ) -> Result<T, string> {
-    let lease = checkout(r)?;
-    let out = op(lease.conn);
-    let error = pool.error_of(out);
-    if (retry && pool.retry_on_fresh(error, lease.reused)) {
-        postgres.disconnect(lease.conn);
-        return match (open(r)) {
-            Result.Ok(c) => {
-                let again = op(c);
-                give_back(r, c, pool.error_of(again));
-                again
-            },
-            Result.Err(e) => {
-                send(r.conns, PgSlot.Empty);
-                Result.Err(e)
-            },
-        };
-    }
-    give_back(r, lease.conn, error);
-    out
+    pool.run(r.conns, retry, fn() -> Result<postgres.Conn, string> { open(r) }, fn(c: postgres.Conn) {
+        postgres.disconnect(c);
+    }, op)
 }
 
 fn to_int(s: string) -> int {

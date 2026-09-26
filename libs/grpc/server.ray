@@ -26,6 +26,9 @@ from grpc/status import Status;
 pub const DEFAULT_MAX_MESSAGE: int = 4194304;
 
 /// One unary call as the handler sees it.
+/// A unary method's implementation: the decoded call in, the serialized reply or a status out.
+pub type Handler = fn(Call) -> Result<bytes, Status>;
+
 pub struct Call {
     /// "/package.Service/Method".
     path: string,
@@ -57,24 +60,24 @@ pub fn default_options() -> Options {
 
 /// Maps method paths to handlers; unknown paths answer UNIMPLEMENTED.
 pub struct Router {
-    routes: Map<string, fn(Call) -> Result<bytes, Status>>,
+    routes: Map<string, Handler>,
 }
 
 /// An empty router.
 pub fn router() -> Router {
-    let routes: Map<string, fn(Call) -> Result<bytes, Status>> = Map.new();
+    let routes: Map<string, Handler> = Map.new();
     Router { routes: routes }
 }
 
 /// Registers the handler of a method path ("/package.Service/Method"). Returns the router
 /// for chaining.
-pub fn route(r: Router, path: string, f: fn(Call) -> Result<bytes, Status>) -> Router {
+pub fn route(r: Router, path: string, f: Handler) -> Router {
     r.routes.insert(path, f);
     r
 }
 
 /// Registers the handler of every path without a route of its own (instead of UNIMPLEMENTED).
-pub fn fallback(r: Router, f: fn(Call) -> Result<bytes, Status>) -> Router {
+pub fn fallback(r: Router, f: Handler) -> Router {
     // "" can never be a real method path (they start with '/').
     r.routes.insert("", f);
     r
@@ -99,7 +102,7 @@ pub fn bind(host: string, port: int) -> Result<Listener, string> {
 }
 
 /// Serves forever with the default options.
-pub fn serve(l: Listener, handler: fn(Call) -> Result<bytes, Status>) -> Result<int, string> {
+pub fn serve(l: Listener, handler: Handler) -> Result<int, string> {
     let never: Channel<int> = Channel.new();
     serve_until(l, never, default_options(), handler)
 }
@@ -131,34 +134,28 @@ pub fn serve_router_until(
             Option.None => return Result.Ok(0),
         }
     }
-    // (release 1.27.11 does not treat `while (true)` as diverging)
-    Result.Err("unreachable: the accept loop only returns from inside")
 }
 
-/// Serves until a value arrives on `stop` (any but 28, SIGWINCH) or it is closed; pass
-/// `signals()` to stop on SIGTERM/SIGINT.
+/// Serves until a value arrives on `stop` or it is closed; pass `webserver.shutdown_signals()`
+/// (net) to stop on SIGTERM/SIGINT.
 /// Then the listener is closed and Ok(0) returned; connections in flight finish on their own.
 pub fn serve_until(
     l: Listener,
     stop: Channel<int>,
     opts: Options,
-    handler: fn(Call) -> Result<bytes, Status>
+    handler: Handler
 ) -> Result<int, string> {
     while (true) {
         match (next_conn(l, stop)?) {
             Option.Some(conn) => {
                 spawn(fn() {
-                    // The literal wrapper matters: storing the parameter itself in the router's
-                    // map does not compile in native binaries.
-                    let r = router().fallback(fn(c: Call) -> Result<bytes, Status> { handler(c) });
+                    let r = router().fallback(handler);
                     serve_conn(conn, opts, r);
                 });
             },
             Option.None => return Result.Ok(0),
         }
     }
-    // (release 1.27.11 does not treat `while (true)` as diverging)
-    Result.Err("unreachable: the accept loop only returns from inside")
 }
 
 // The next accepted connection; None once `stop` fires (the listener is then closed). Accepts
@@ -169,8 +166,7 @@ fn next_conn(l: Listener, stop: Channel<int>) -> Result<Option<int>, string> {
     while (true) {
         let stopping = match (try_recv(stop)) {
             Received.Empty => false,
-            // With `signals()` as the stop channel, a terminal resize (SIGWINCH) is not a stop.
-            Received.Got(sig) => sig != 28,
+            Received.Got(_) => true,
             Received.Closed => true,
         };
         if (stopping) {
@@ -191,8 +187,6 @@ fn next_conn(l: Listener, stop: Channel<int>) -> Result<Option<int>, string> {
             },
         }
     }
-    // (release 1.27.11 does not treat `while (true)` as diverging)
-    Result.Err("unreachable: the loop only returns from inside")
 }
 
 // The request state of one stream.
@@ -294,8 +288,6 @@ fn run_conn(l: h2.Link, opts: Options, r: Router) -> Result<int, string> {
             return Result.Ok(0);
         }
     }
-    // (release 1.27.11 does not treat `while (true)` as diverging)
-    Result.Err("unreachable: the frame loop only returns from inside")
 }
 
 // Updates the stream table with a HEADERS / DATA / RST_STREAM frame; streams whose request

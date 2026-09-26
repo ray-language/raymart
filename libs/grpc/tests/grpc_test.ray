@@ -108,6 +108,13 @@ fn start() -> (int, Channel<int>) {
     return (l.port, stop);
 }
 
+// Stops a server started by `start`. (Closing `s.1` directly does not compile natively: the
+// transpiler takes a channel read out of a tuple for a handle — RAYLANG-FINDINGS #76.)
+fn stop_server(s: (int, Channel<int>)) {
+    let stop: Channel<int> = s.1;
+    close(stop);
+}
+
 fn no_md() -> Map<string, string> {
     let m: Map<string, string> = Map.new();
     m
@@ -129,7 +136,7 @@ fn unary_round_trip() {
         .call_once("127.0.0.1", s.0, ECHO, echo_request("hé", 3), no_md(), 0)
         .expect("call");
     assert_eq(text_of(e.message), "héhéhé");
-    close(s.1);
+    stop_server(s);
 }
 
 @test
@@ -140,7 +147,7 @@ fn unknown_method_is_unimplemented() {
         .expect("call");
     assert_eq(r.status, status.UNIMPLEMENTED);
     assert(r.status_message.contains("/raymart.test.v1.Calc/Nope"));
-    close(s.1);
+    stop_server(s);
 }
 
 @test
@@ -151,7 +158,7 @@ fn handler_status_and_encoded_message() {
     assert_eq(r.status_message, "no intent «pi_7» 100% gone\nsecond line");
     let res = client.into_result(r);
     assert(res.is_err());
-    close(s.1);
+    stop_server(s);
 }
 
 @test
@@ -163,7 +170,7 @@ fn a_panicking_handler_is_internal() {
     let ok = client.call(c, SUM, sum_request([1]), no_md(), 2000).expect("call");
     assert_eq(ok.status, status.OK);
     client.disconnect(c);
-    close(s.1);
+    stop_server(s);
 }
 
 @test
@@ -178,7 +185,7 @@ fn metadata_reaches_the_handler() {
         text_of(r.message),
         "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01|ada|deadline"
     );
-    close(s.1);
+    stop_server(s);
 }
 
 @test
@@ -195,7 +202,7 @@ fn several_calls_share_one_connection() {
     assert_eq(text_of(again.message), "ok");
     assert_eq(c.next_id, 45);
     client.disconnect(c);
-    close(s.1);
+    stop_server(s);
 }
 
 @test
@@ -214,7 +221,7 @@ fn large_messages_cross_flow_control() {
     assert_eq(r2.status, status.OK);
     assert_eq(text_of(r2.message).len(), 409600);
     client.disconnect(c);
-    close(s.1);
+    stop_server(s);
 }
 
 @test
@@ -252,7 +259,7 @@ fn deadline_does_not_hang() {
     assert_eq(ok.status, status.OK);
     assert_eq(protobuf.get_int(protobuf.parse(ok.message).expect("parse"), 1), 5);
     client.disconnect(c);
-    close(s.1);
+    stop_server(s);
 }
 
 @test
@@ -348,5 +355,5 @@ fn interleaved_streams_padding_and_continuation() {
     assert_eq(protobuf.get_int(protobuf.parse(r1).expect("parse"), 1), 42);
     let r3 = protobuf.grpc_unframe(bodies.get_or(3, b"")).expect("unframe 3");
     assert_eq(text_of(r3), "threethree");
-    close(s.1);
+    stop_server(s);
 }

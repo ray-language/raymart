@@ -279,9 +279,7 @@ pub fn run_stage(t: Target, scenario: string, vus: int, seconds: int) -> StageRe
     for _ in 0..vus {
         match (recv(done)) {
             Option.Some(r) => stats.merge(merged, r),
-            Option.None => {
-                break;
-            },
+            Option.None => break,
         }
     }
     let elapsed = (now_ns() - t0) as float / 1000000000.0;

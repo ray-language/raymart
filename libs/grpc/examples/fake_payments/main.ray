@@ -15,6 +15,7 @@ import grpc/server;
 import grpc/status;
 import grpc/client;
 import std/time;
+import net/webserver;
 import std/protobuf;
 from grpc/server import Call, Router;
 from grpc/status import Status;
@@ -303,7 +304,7 @@ fn main() -> int {
             return 1;
         },
     };
-    let stop: Channel<int> = if (selftest) { Channel.new() } else { signals() };
+    let stop: Channel<int> = if (selftest) { Channel.new() } else { webserver.shutdown_signals() };
     let failed: Channel<int> = Channel.new();
     if (selftest) {
         let p = l.port;

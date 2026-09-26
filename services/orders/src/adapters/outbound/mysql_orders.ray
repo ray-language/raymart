@@ -13,13 +13,7 @@ pub struct MysqlOrders {
     user: string,
     password: string,
     database: string,
-    conns: Channel<MySlot>,
-}
-
-/// A pool slot (common/pool.ray): an idle connection, or one to dial.
-pub enum MySlot {
-    Ready(mysql.Conn),
-    Empty,
+    conns: pool.Pool<mysql.Conn>,
 }
 
 /// The repository with a pool of up to `pool_size` connections (dialed on demand).
@@ -31,18 +25,13 @@ pub fn new_orders(
     database: string,
     pool_size: int
 ) -> MysqlOrders {
-    let n = if (pool_size < 1) { 1 } else { pool_size };
-    let slots: Channel<MySlot> = Channel.bounded(n);
-    for _ in 0..n {
-        send(slots, MySlot.Empty);
-    }
     MysqlOrders {
         host: host,
         port: port,
         user: user,
         password: password,
         database: database,
-        conns: slots
+        conns: pool.new_pool(pool_size)
     }
 }
 
@@ -53,43 +42,8 @@ fn open(r: MysqlOrders) -> Result<mysql.Conn, string> {
     }
 }
 
-/// A checked-out connection, and whether it was reused (it may have gone stale while idle).
-struct MyLease {
-    conn: mysql.Conn,
-    reused: bool,
-}
-
-fn checkout(r: MysqlOrders) -> Result<MyLease, string> {
-    match (recv(r.conns)) {
-        Option.None => Result.Err("unavailable: orders database: the pool is closed"),
-        Option.Some(slot) => match (slot) {
-            MySlot.Ready(c) => Result.Ok(MyLease { conn: c, reused: true }),
-            MySlot.Empty => match (open(r)) {
-                Result.Ok(c) => Result.Ok(MyLease { conn: c, reused: false }),
-                Result.Err(e) => {
-                    send(r.conns, MySlot.Empty);
-                    Result.Err(e)
-                },
-            },
-        },
-    }
-}
-
-/// Gives `c` back after an operation; a wire error closes it and empties its slot instead.
-fn give_back(r: MysqlOrders, c: mysql.Conn, error: string) {
-    if (error == "" || pool.connection_ok(error)) {
-        // db/mysql never compacts its read buffer (RAYLANG-FINDINGS #72): a pooled connection
-        // would keep every byte it ever read — and copy it all whenever it crosses the channel.
-        // Between operations the buffer is fully consumed, so it can simply start over.
-        if (c.pos >= c.buf.len()) {
-            c.buf = [];
-            c.pos = 0;
-        }
-        send(r.conns, MySlot.Ready(c));
-    } else {
-        mysql.disconnect(c);
-        send(r.conns, MySlot.Empty);
-    }
+fn close_conn(c: mysql.Conn) {
+    mysql.disconnect(c);
 }
 
 /// Runs `op` on a pooled connection. With `retry` (idempotent operations only), a reused
@@ -99,25 +53,7 @@ fn with_conn<T>(
     retry: bool,
     op: fn(mysql.Conn) -> Result<T, string>
 ) -> Result<T, string> {
-    let lease = checkout(r)?;
-    let out = op(lease.conn);
-    let error = pool.error_of(out);
-    if (retry && pool.retry_on_fresh(error, lease.reused)) {
-        mysql.disconnect(lease.conn);
-        return match (open(r)) {
-            Result.Ok(c) => {
-                let again = op(c);
-                give_back(r, c, pool.error_of(again));
-                again
-            },
-            Result.Err(e) => {
-                send(r.conns, MySlot.Empty);
-                Result.Err(e)
-            },
-        };
-    }
-    give_back(r, lease.conn, error);
-    out
+    pool.run(r.conns, retry, fn() -> Result<mysql.Conn, string> { open(r) }, close_conn, op)
 }
 
 // The order, its items and its outbox message in one transaction. Err("begin: …") when the
@@ -291,24 +227,24 @@ impl OrderRepository for MysqlOrders {
     fn create(self, order: Order, outbox_kind: string, outbox_payload: string) -> Result<int, string> {
         // Not idempotent (a lost COMMIT acknowledgement must not become a second attempt), so a
         // stale connection is only replaced when the transaction could not even begin.
-        let lease = checkout(self)?;
+        let lease = pool.checkout(self.conns, fn() -> Result<mysql.Conn, string> { open(self) })?;
         let out = create_tx(lease.conn, order, outbox_kind, outbox_payload);
         let error = pool.error_of(out);
         if (lease.reused && error.starts_with("begin: ")) {
-            mysql.disconnect(lease.conn);
+            close_conn(lease.conn);
             return match (open(self)) {
                 Result.Ok(c) => {
                     let again = create_tx(c, order, outbox_kind, outbox_payload);
-                    give_back(self, c, pool.error_of(again));
+                    pool.give_back(self.conns, c, pool.error_of(again), close_conn);
                     again
                 },
                 Result.Err(e) => {
-                    send(self.conns, MySlot.Empty);
+                    pool.discard(self.conns);
                     Result.Err(e)
                 },
             };
         }
-        give_back(self, lease.conn, error);
+        pool.give_back(self.conns, lease.conn, error, close_conn);
         out
     }
 

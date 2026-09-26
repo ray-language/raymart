@@ -2,9 +2,9 @@
 // intent id), over a pool of connections (common/pool.ray): the SCRAM handshake is paid once
 // per connection, not per operation. `create_if_absent` relies on a UNIQUE index on order_id,
 // so two concurrent requests for the same order cannot create two intents.
-import mongodb/mongo;
+import db/mongo;
 import common/pool;
-import mongodb/bson;
+import db/bson;
 import std/crypto;
 import std/hex;
 import std/time;
@@ -17,13 +17,7 @@ pub struct MongoIntents {
     user: string,
     password: string,
     database: string,
-    conns: Channel<MgSlot>,
-}
-
-/// A pool slot (common/pool.ray): an idle connection, or one to dial.
-pub enum MgSlot {
-    Ready(mongo.Conn),
-    Empty,
+    conns: pool.Pool<mongo.Conn>,
 }
 
 /// The repository with a pool of up to `pool_size` connections (dialed on demand).
@@ -35,18 +29,13 @@ pub fn new_intents(
     database: string,
     pool_size: int
 ) -> MongoIntents {
-    let n = if (pool_size < 1) { 1 } else { pool_size };
-    let slots: Channel<MgSlot> = Channel.bounded(n);
-    for _ in 0..n {
-        send(slots, MgSlot.Empty);
-    }
     MongoIntents {
         host: host,
         port: port,
         user: user,
         password: password,
         database: database,
-        conns: slots
+        conns: pool.new_pool(pool_size)
     }
 }
 
@@ -66,61 +55,13 @@ fn open(r: MongoIntents) -> Result<mongo.Conn, string> {
     }
 }
 
-/// A checked-out connection, and whether it was reused (it may have gone stale while idle).
-struct MgLease {
-    conn: mongo.Conn,
-    reused: bool,
-}
-
-fn checkout(r: MongoIntents) -> Result<MgLease, string> {
-    match (recv(r.conns)) {
-        Option.None => Result.Err("unavailable: payments database: the pool is closed"),
-        Option.Some(slot) => match (slot) {
-            MgSlot.Ready(c) => Result.Ok(MgLease { conn: c, reused: true }),
-            MgSlot.Empty => match (open(r)) {
-                Result.Ok(c) => Result.Ok(MgLease { conn: c, reused: false }),
-                Result.Err(e) => {
-                    send(r.conns, MgSlot.Empty);
-                    Result.Err(e)
-                },
-            },
-        },
-    }
-}
-
-/// Gives `c` back after an operation; a wire error closes it and empties its slot instead.
-fn give_back(r: MongoIntents, c: mongo.Conn, error: string) {
-    if (error == "" || pool.connection_ok(error)) {
-        send(r.conns, MgSlot.Ready(c));
-    } else {
-        mongo.disconnect(c);
-        send(r.conns, MgSlot.Empty);
-    }
-}
-
 /// Runs `op` on a pooled connection; a reused connection that fails on the wire is replaced
-/// and `op` runs once more (common/pool.ray). Every operation here is idempotent: the intent
-/// is unique per order, and `finish` is a compare-and-set.
+/// and `op` runs once more (common/pool.ray). Every operation here is idempotent: the intent is
+/// unique per order, and `finish` is a compare-and-set.
 fn with_conn<T>(r: MongoIntents, op: fn(mongo.Conn) -> Result<T, string>) -> Result<T, string> {
-    let lease = checkout(r)?;
-    let out = op(lease.conn);
-    let error = pool.error_of(out);
-    if (pool.retry_on_fresh(error, lease.reused)) {
-        mongo.disconnect(lease.conn);
-        return match (open(r)) {
-            Result.Ok(c) => {
-                let again = op(c);
-                give_back(r, c, pool.error_of(again));
-                again
-            },
-            Result.Err(e) => {
-                send(r.conns, MgSlot.Empty);
-                Result.Err(e)
-            },
-        };
-    }
-    give_back(r, lease.conn, error);
-    out
+    pool.run(r.conns, true, fn() -> Result<mongo.Conn, string> { open(r) }, fn(c: mongo.Conn) {
+        mongo.disconnect(c);
+    }, op)
 }
 
 fn s(v: string) -> bson.Bson {
@@ -254,10 +195,11 @@ fn winner(c: mongo.Conn, order_id: string) -> Result<Intent, string> {
 fn create_on(c: mongo.Conn, intent: Intent) -> Result<Intent, string> {
     match (find_one(c, [bson.field("order_id", s(intent.order_id))])?) {
         Option.Some(i) => Result.Ok(i),
-        // insert answers Ok(0) — not Err — when the unique index refuses the document (MongoDB
-        // reports it as a writeError inside an ok:1 reply): 1 means we won.
+        // Another request for the same order may win the race to the unique index; db 0.1.1
+        // reports the refused insert as an error (writeErrors), and the stored intent is the
+        // order's intent.
         Option.None => match (mongo.insert(c, COLL, [to_doc(intent)])) {
-            Result.Ok(n) => if (n == 1) { Result.Ok(intent) } else { winner(c, intent.order_id) },
+            Result.Ok(_) => Result.Ok(intent),
             Result.Err(_) => winner(c, intent.order_id),
         },
     }

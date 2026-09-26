@@ -60,7 +60,13 @@ fn events_round_trip() {
 
 @test
 fn the_payment_protobuf_round_trips() {
-    let req = paymentpb.CreateIntentRequest { order_id: "o1", amount_cents: 129900, currency: "USD", card_last4: "4242", user_id: "ada" };
+    let req = paymentpb.CreateIntentRequest {
+        order_id: "o1",
+        amount_cents: 129900,
+        currency: "USD",
+        card_last4: "4242",
+        user_id: "ada"
+    };
     match (paymentpb.decode_create(paymentpb.encode_create(req))) {
         Result.Ok(r) => {
             assert_eq(r.order_id, "o1");
@@ -69,7 +75,15 @@ fn the_payment_protobuf_round_trips() {
         },
         Result.Err(e) => panic(e),
     }
-    let i = paymentpb.Intent { id: "pi_1", order_id: "o1", amount_cents: 5, currency: "USD", status: "succeeded", reason: "", user_id: "ada" };
+    let i = paymentpb.Intent {
+        id: "pi_1",
+        order_id: "o1",
+        amount_cents: 5,
+        currency: "USD",
+        status: "succeeded",
+        reason: "",
+        user_id: "ada"
+    };
     match (paymentpb.decode_intent(paymentpb.encode_intent(i))) {
         Result.Ok(d) => {
             assert_eq(d.status, "succeeded");
@@ -77,5 +91,8 @@ fn the_payment_protobuf_round_trips() {
         },
         Result.Err(e) => panic(e),
     }
-    assert_eq(match (paymentpb.decode_get(paymentpb.encode_get(paymentpb.GetIntentRequest { id: "pi_9" }))) { Result.Ok(g) => g.id, Result.Err(_) => "" }, "pi_9");
+    assert_eq(match (paymentpb.decode_get(paymentpb.encode_get(paymentpb.GetIntentRequest { id: "pi_9" }))) {
+        Result.Ok(g) => g.id,
+        Result.Err(_) => "",
+    }, "pi_9");
 }

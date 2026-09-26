@@ -4,7 +4,6 @@
 // containers that worked hardest.
 import std/fs;
 import stats;
-from gatewaymetrics import last_index;
 
 pub struct Sample {
     at_ms: int,
@@ -39,7 +38,7 @@ pub fn short_name(n: string) -> string {
     if (s.starts_with("raymart-")) {
         s = s.substring(8, s.len());
     }
-    let i = last_index(s, "-");
+    let i = s.last_index_of("-").unwrap_or(-1);
     if (i >= 0 && parse_int(s.substring(i + 1, s.len())).is_some()) {
         return s.substring(0, i);
     }

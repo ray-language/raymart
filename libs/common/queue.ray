@@ -30,11 +30,15 @@ pub fn push(p: rpc.Pool, queue: string, body: string) -> Result<string, string> 
 pub fn pull(p: rpc.Pool, queue: string) -> Result<Option<Message>, string> {
     let r = rpc.pool_call(p, "pull", params([("queue", queue)]))?;
     match (json.get_string(r, "id")) {
-        Option.Some(id) => Result.Ok(Option.Some(Message {
-            id: id,
-            body: json.get_string(r, "body").unwrap_or(""),
-            attempt: json.get_int(r, "attempt").unwrap_or(1),
-        })),
+        Option.Some(id) => Result.Ok(
+            Option.Some(
+                Message {
+                    id: id,
+                    body: json.get_string(r, "body").unwrap_or(""),
+                    attempt: json.get_int(r, "attempt").unwrap_or(1)
+                }
+            )
+        ),
         Option.None => Result.Ok(Option.None),
     }
 }

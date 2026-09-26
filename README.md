@@ -71,8 +71,8 @@ services/<servicio>/src/
 
 Los puertos son traits y los casos de uso son genéricos sobre ellos
 (`Orders<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>`): el mismo código corre
-contra MySQL en producción y contra memoria en los tests. (Un campo `dyn Trait` en un struct no
-compila en raylang 1.27.11; los genéricos sí, en VM y en nativo.)
+contra MySQL en producción y contra memoria en los tests. (Hasta raylang 1.27.12 un campo
+`dyn Trait` no compilaba; los genéricos, además, resuelven el adaptador en compilación.)
 
 ## La saga del checkout
 
@@ -128,6 +128,7 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
 | `test-it` | tests de integración de los adaptadores contra las bases en Docker |
 | `check-release` | compila y testea todo con la **release** de raylang que usan las imágenes |
 | `check-release-it` | los tests de integración con la release, desde un contenedor |
+| `check-native` | los tests unitarios sobre binarios nativos (`ray test --native`), con la release |
 | `e2e` | escenarios de punta a punta a través del gateway (el CLI nativo, dentro de la red) |
 | `chaos` | resiliencia: payment caído durante un checkout |
 | `chaos-db` | resiliencia: reinicia las cuatro bases de datos; el primer e2e de después debe pasar entero |
@@ -140,7 +141,7 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
 
 | Qué | Verificado |
 |---|---|
-| Tests unitarios | common 9 · grpc 12 · products 10 · cart 7 · orders 14 · payment 10 · tools 11 — con la release 1.27.11 |
+| Tests unitarios | common 12 · grpc 12 · products 13 · cart 7 · orders 15 · payment 10 · tools 10 — con la release 1.27.14, en VM y en nativo |
 | Integración | PostgreSQL 18: 5 (seis pedidos por la última unidad: gana uno; conexiones matadas por el servidor) · raykv: 2 (con TTL) · MySQL 8.4: 4 (pedido + outbox atómicos; conexiones matadas) · MongoDB 8: 2 (cinco CreateIntent concurrentes: un intent) |
 | gRPC | contrato payment en proceso; interop con `grpcurl` (librería) |
 | Docker | las 11 piezas sanas; `make e2e` 19/19; `make chaos` pendiente → pagado; `make chaos-db` 19/19 tras reiniciar las bases; raywatch 11/11 en verde |
@@ -155,9 +156,8 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
   `PG_POOL_SIZE`, `MYSQL_POOL_SIZE`, `MONGO_POOL_SIZE`, `RAYKV_POOL_SIZE`, `RPC_POOL_SIZE`.
 - **El estado vive en las bases de datos.** Los handlers gRPC y HTTP reciben una *copia* de lo
   que capturan (por conexión), así que nada en memoria del proceso es estado compartido.
-- **`libs/mongodb`** es una copia parcheada del cliente MongoDB de raylang (`db` 0.1.0): la
-  original no puede autenticarse contra MongoDB 6 o posterior (verificado con 8.3). Se elimina cuando `db` publique el arreglo.
-- **Toolchain.** Las imágenes usan la release 1.27.11; `make check-release` y
+- **Toolchain.** Las imágenes usan la release 1.27.14 (cada `ray.toml` la exige con
+  `[package] raylang`); `make check-release` y
   `make check-release-it` corren los tests con ella en un contenedor, así que no dependen del
   toolchain del host. `make test` y `make test-it` usan el `ray` local.
 - El JWT de desarrollo (`raymart-dev-secret-change-me`) está en `docker-compose.yml` y en

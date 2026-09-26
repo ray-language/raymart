@@ -75,20 +75,10 @@ fn dispatch<R: ProductRepository>(catalog: Catalog<R>, req: rpc.Req) -> Result<j
         return Result.Ok(count(release_reservation(catalog, str_param(req, "order_id")?)?));
     }
     if (req.method == "products.restock") {
-        match (both(json.get_int(req.params, "id"), json.get_int(req.params, "qty"))) {
-            Option.Some(p) => return Result.Ok(to_json(restock_product(catalog, p.0, p.1)?)),
-            Option.None => return Result.Err("invalid: products.restock needs 'id' and 'qty'"),
+        match ((json.get_int(req.params, "id"), json.get_int(req.params, "qty"))) {
+            (Option.Some(id), Option.Some(qty)) => return Result.Ok(to_json(restock_product(catalog, id, qty)?)),
+            _ => return Result.Err("invalid: products.restock needs 'id' and 'qty'"),
         }
     }
     Result.Err("invalid: unknown method ${req.method}")
-}
-
-fn both(a: Option<int>, b: Option<int>) -> Option<(int, int)> {
-    match (a) {
-        Option.Some(x) => match (b) {
-            Option.Some(y) => Option.Some((x, y)),
-            Option.None => Option.None,
-        },
-        Option.None => Option.None,
-    }
 }

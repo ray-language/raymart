@@ -129,12 +129,8 @@ fn postgres_restocks() {
     }
     set_stock(3, 4);
     match (repo().restock(3, 6)) {
-        Result.Ok(found) => {
-            match (found) {
-                Option.Some(p) => assert_eq(p.stock, 10),
-                Option.None => panic("product 3 missing"),
-            }
-        },
+        Result.Ok(Option.Some(p)) => assert_eq(p.stock, 10),
+        Result.Ok(Option.None) => panic("product 3 missing"),
         Result.Err(e) => panic(e),
     }
     assert_eq(stock(3), 10);

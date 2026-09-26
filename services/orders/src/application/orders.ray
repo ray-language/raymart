@@ -9,7 +9,16 @@
 //            the order. Stock first: a retry after a failure redoes an idempotent step.
 import std/json;
 from domain/ports import OrderRepository, CartGateway, Inventory, Payments;
-from domain/order import Order, PaymentResult, OutboxEntry, new_order, valid_card_last4, payment_request, PENDING, PAID, CANCELLED;
+from domain/order import
+    Order,
+    PaymentResult,
+    OutboxEntry,
+    new_order,
+    valid_card_last4,
+    payment_request,
+    PENDING,
+    PAID,
+    CANCELLED;
 
 pub const PAYMENT_REQUESTED: string = "payment.requested";
 
@@ -20,11 +29,23 @@ pub struct Orders<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>
     payments: P,
 }
 
-pub fn new_orders<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(repo: R, cart: C, inventory: I, payments: P) -> Orders<R, C, I, P> {
+pub fn new_orders<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(
+    repo: R,
+    cart: C,
+    inventory: I,
+    payments: P
+) -> Orders<R, C, I, P> {
     Orders { repo: repo, cart: cart, inventory: inventory, payments: payments }
 }
 
-pub fn checkout<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(o: Orders<R, C, I, P>, user: string, card_last4: string, order_id: string, now_ms: int, tp: string) -> Result<Order, string> {
+pub fn checkout<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(
+    o: Orders<R, C, I, P>,
+    user: string,
+    card_last4: string,
+    order_id: string,
+    now_ms: int,
+    tp: string
+) -> Result<Order, string> {
     if (!valid_card_last4(card_last4)) {
         return Result.Err("invalid: card_last4 must be 4 digits");
     }
@@ -47,15 +68,26 @@ pub fn checkout<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(o
     Result.Ok(order)
 }
 
-pub fn get_order<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(o: Orders<R, C, I, P>, user: string, id: string) -> Result<Order, string> {
+pub fn get_order<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(
+    o: Orders<R, C, I, P>,
+    user: string,
+    id: string
+) -> Result<Order, string> {
     match (o.repo.find(id)?) {
         // Someone else's order does not exist, as far as this user is concerned.
-        Option.Some(order) => if (order.user_id == user) { Result.Ok(order) } else { Result.Err("not_found: no order ${id}") },
+        Option.Some(order) => if (order.user_id == user) {
+            Result.Ok(order)
+        } else {
+            Result.Err("not_found: no order ${id}")
+        },
         Option.None => Result.Err("not_found: no order ${id}"),
     }
 }
 
-pub fn list_orders<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(o: Orders<R, C, I, P>, user: string) -> Result<[Order], string> {
+pub fn list_orders<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(
+    o: Orders<R, C, I, P>,
+    user: string
+) -> Result<[Order], string> {
     o.repo.list_for(user)
 }
 
@@ -64,7 +96,10 @@ pub fn list_orders<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments
 /// rejection (invalid / not_found) must not block the queue forever: the message is set aside
 /// and its order is failed like a declined payment (stock released, order cancelled).
 /// Returns how many messages were handled.
-pub fn relay_outbox<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(o: Orders<R, C, I, P>, limit: int) -> Result<int, string> {
+pub fn relay_outbox<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(
+    o: Orders<R, C, I, P>,
+    limit: int
+) -> Result<int, string> {
     var handled = 0;
     for entry in o.repo.pending_outbox(limit)? {
         let tp = match (json.parse(entry.payload)) {
@@ -77,7 +112,12 @@ pub fn relay_outbox<R: OrderRepository, C: CartGateway, I: Inventory, P: Payment
                 if (!is_permanent(e)) {
                     return Result.Err(e);
                 }
-                let rejected = PaymentResult { order_id: entry.order_id, payment_id: "", succeeded: false, reason: "payment request rejected: " + e };
+                let rejected = PaymentResult {
+                    order_id: entry.order_id,
+                    payment_id: "",
+                    succeeded: false,
+                    reason: "payment request rejected: " + e
+                };
                 apply_payment_result(o, rejected, tp)?;
             },
         }
@@ -94,7 +134,11 @@ pub fn is_permanent(e: string) -> bool {
 
 /// Applies a payment outcome. Idempotent: an order that already left pending_payment is left
 /// as it is ("duplicate"), an unknown order is ignored.
-pub fn apply_payment_result<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(o: Orders<R, C, I, P>, r: PaymentResult, tp: string) -> Result<string, string> {
+pub fn apply_payment_result<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(
+    o: Orders<R, C, I, P>,
+    r: PaymentResult,
+    tp: string
+) -> Result<string, string> {
     let order = match (o.repo.find(r.order_id)?) {
         Option.Some(x) => x,
         Option.None => return Result.Ok("ignored"),

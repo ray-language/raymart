@@ -41,10 +41,3 @@ fn diffs_routes_with_traffic() {
     assert_eq(d[0].p95_le, "≤ 25");  // 90 within 10, 99 within 25
     assert_eq(d[0].p99_le, "≤ 25");
 }
-
-@test
-fn last_index_finds_the_last_separator() {
-    assert_eq(gm.last_index("a b c", " "), 3);
-    assert_eq(gm.last_index("abc", " "), -1);
-    assert_eq(gm.last_index("x-1-2", "-"), 3);
-}

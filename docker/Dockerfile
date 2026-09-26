@@ -6,7 +6,7 @@
 # Debian trixie and not bookworm: the raylang releases link against glibc 2.39.
 
 FROM debian:trixie-slim AS toolchain
-ARG RAY_VERSION=1.27.11
+ARG RAY_VERSION=1.27.14
 ARG TARGETARCH
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config \
@@ -37,7 +37,6 @@ RUN set -e; \
         cd "/src/raymart/$APP_DIR"; \
     fi; \
     ray fetch; \
-    mkdir -p /out; \
     ray build --native --release -o /out/app
 
 FROM debian:trixie-slim AS runtime

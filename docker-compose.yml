@@ -27,15 +27,15 @@ services:
 
   mysql:
     image: mysql:8.4
-    command: ["--mysql-native-password=ON"]
+    # The orders user authenticates with MySQL 8.4's default, caching_sha2_password (db 0.1.1
+    # does its full RSA exchange in cleartext connections).
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: orders
       MYSQL_USER: orders
       MYSQL_PASSWORD: orders
     volumes:
-      - mysql-data:/var/lib/mysql
-      - ./docker/mysql-init.sql:/docker-entrypoint-initdb.d/10-native-password.sql:ro
+      - mysql84-data:/var/lib/mysql
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uorders -porders --silent"]
       interval: 3s
@@ -57,7 +57,7 @@ services:
   raykv:
     build:
       <<: *raylang-build
-      args: { APP_REPO: "https://github.com/ray-language/raykv.git", APP_REF: "9b40c00" }
+      args: { APP_REPO: "https://github.com/ray-language/raykv.git", APP_REF: "4ab872f" }
     command: ["--bind", "0.0.0.0", "--port", "7379", "--dir", "/data"]
     volumes: [raykv-data:/data]
     # The image holds only the binary; bash (from debian-slim) opens the port.
@@ -69,7 +69,7 @@ services:
   rayq:
     build:
       <<: *raylang-build
-      args: { APP_REPO: "https://github.com/ray-language/rayq.git", APP_REF: "7bb2f82" }
+      args: { APP_REPO: "https://github.com/ray-language/rayq.git", APP_REF: "c9c0b27" }
     command: ["serve", "--bind", "0.0.0.0", "--port", "7450", "--dir", "/data"]
     volumes: [rayq-data:/data]
     healthcheck:
@@ -175,7 +175,7 @@ services:
   raygate:
     build:
       <<: *raylang-build
-      args: { APP_REPO: "https://github.com/ray-language/raygate.git", APP_REF: "772c43d" }
+      args: { APP_REPO: "https://github.com/ray-language/raygate.git", APP_REF: "766d7c8" }
     command: ["--config", "/etc/raygate/raygate.toml"]
     volumes: [./config/raygate.toml:/etc/raygate/raygate.toml:ro]
     ports: ["127.0.0.1:8088:8080"]
@@ -188,7 +188,7 @@ services:
   raywatch:
     build:
       <<: *raylang-build
-      args: { APP_REPO: "https://github.com/ray-language/raywatch.git", APP_REF: "a20a47c" }
+      args: { APP_REPO: "https://github.com/ray-language/raywatch.git", APP_REF: "a746581" }
     command: ["--config", "/etc/raywatch/raywatch.toml"]
     volumes:
       - ./config/raywatch.toml:/etc/raywatch/raywatch.toml:ro
@@ -216,11 +216,11 @@ services:
     profiles: ["tools"]
     build:
       <<: *raylang-build
-      args: { APP_REPO: "https://github.com/ray-language/raylogs.git", APP_REF: "1002c71" }
+      args: { APP_REPO: "https://github.com/ray-language/raylogs.git", APP_REF: "8667d55" }
 
 volumes:
   postgres18-data:
-  mysql-data:
+  mysql84-data:
   mongo8-data:
   raykv-data:
   rayq-data:
