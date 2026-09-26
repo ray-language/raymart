@@ -141,7 +141,7 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
 
 | Qué | Verificado |
 |---|---|
-| Tests unitarios | common 9 · grpc 12 · products 10 · cart 7 · orders 14 · payment 10 · tools 11 — con la release 1.27.14, en VM y en nativo |
+| Tests unitarios | common 12 · grpc 12 · products 13 · cart 7 · orders 15 · payment 10 · tools 10 — con la release 1.27.14, en VM y en nativo |
 | Integración | PostgreSQL 18: 5 (seis pedidos por la última unidad: gana uno; conexiones matadas por el servidor) · raykv: 2 (con TTL) · MySQL 8.4: 4 (pedido + outbox atómicos; conexiones matadas) · MongoDB 8: 2 (cinco CreateIntent concurrentes: un intent) |
 | gRPC | contrato payment en proceso; interop con `grpcurl` (librería) |
 | Docker | las 11 piezas sanas; `make e2e` 19/19; `make chaos` pendiente → pagado; `make chaos-db` 19/19 tras reiniciar las bases; raywatch 11/11 en verde |
