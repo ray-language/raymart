@@ -43,10 +43,10 @@ make chaos   # checkout con payment caído: el pedido espera y se paga cuando vu
 | Pieza | Papel | Datos · protocolos | Origen |
 |---|---|---|---|
 | **raygate** | gateway | HTTP | ray-apps, binario nativo |
-| **products** | catálogo y stock | PostgreSQL · HTTP + rpc | nuevo |
+| **products** | catálogo y stock | PostgreSQL 18 · HTTP + rpc | nuevo |
 | **cart** | carrito por usuario | raykv · HTTP + rpc | nuevo |
-| **orders** | pedidos y saga del checkout | MySQL · HTTP · cliente gRPC · rayq | nuevo |
-| **payment** | intents y cobros | MongoDB · gRPC + HTTP · rayq | nuevo |
+| **orders** | pedidos y saga del checkout | MySQL 8.4 LTS · HTTP · cliente gRPC · rayq | nuevo |
+| **payment** | intents y cobros | MongoDB 8 · gRPC + HTTP · rayq | nuevo |
 | **rayq** | cola persistente at-least-once con DLQ | rpc | ray-apps, binario nativo |
 | **raykv** | clave-valor RESP | Redis | ray-apps, binario nativo |
 | **raywatch** | dashboard de salud | HTTP/SSE | ray-apps, binario nativo |
@@ -135,7 +135,7 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
 | Qué | Verificado |
 |---|---|
 | Tests unitarios | common 7 · grpc 12 · products 10 · cart 7 · orders 14 · payment 10 — con el toolchain local y con la release 1.27.11 |
-| Integración | PostgreSQL 3 (seis pedidos por la última unidad: gana uno) · raykv 2 (con TTL) · MySQL 3 (pedido + outbox atómicos) · MongoDB 2 (cinco CreateIntent concurrentes: un intent) |
+| Integración | PostgreSQL 18: 3 (seis pedidos por la última unidad: gana uno) · raykv: 2 (con TTL) · MySQL 8.4: 3 (pedido + outbox atómicos) · MongoDB 8: 2 (cinco CreateIntent concurrentes: un intent) |
 | gRPC | contrato payment en proceso; interop con `grpcurl` (librería) |
 | Docker | las 11 piezas sanas; `make e2e` 19/19; `make chaos` pendiente → pagado; raywatch 11/11 en verde |
 
@@ -146,7 +146,7 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
 - **El estado vive en las bases de datos.** Los handlers gRPC y HTTP reciben una *copia* de lo
   que capturan (por conexión), así que nada en memoria del proceso es estado compartido.
 - **`libs/mongodb`** es una copia parcheada del cliente MongoDB de raylang (`db` 0.1.0): la
-  original no puede autenticarse contra MongoDB 6/7. Se elimina cuando `db` publique el arreglo.
+  original no puede autenticarse contra MongoDB 6 o posterior (verificado con 8.3). Se elimina cuando `db` publique el arreglo.
 - **Toolchain.** Las imágenes usan la release 1.27.11; `make check-release` garantiza que el
   código no dependa de funciones aún no publicadas del toolchain local.
 - El JWT de desarrollo (`raymart-dev-secret-change-me`) está en `docker-compose.yml` y en
