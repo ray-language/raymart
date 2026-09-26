@@ -43,6 +43,17 @@ pub fn validate_lines(lines: [Line]) -> Result<int, string> {
     Result.Ok(lines.len())
 }
 
+/// The most units one restock may add (a guard against a typo adding a billion units).
+pub const MAX_RESTOCK: int = 1000000;
+
+/// A restock (goods received) adds a positive, bounded number of units.
+pub fn validate_restock(qty: int) -> Result<int, string> {
+    if (qty <= 0 || qty > MAX_RESTOCK) {
+        return Result.Err("invalid: restock quantity must be between 1 and ${MAX_RESTOCK}");
+    }
+    Result.Ok(qty)
+}
+
 /// Whether `p` has stock for `qty` more units.
 pub fn has_stock(p: Product, qty: int) -> bool {
     p.stock >= qty

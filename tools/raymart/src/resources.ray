@@ -1,0 +1,184 @@
+// `raymart bench-resources <dir>`: lines up the `docker stats` samples taken on the host while
+// the benchmark ran (docker-stats.csv: "epoch_s,container,cpu%,mem usage / limit") with the
+// stage windows of stages.tsv, and appends a "Resources" section to report.md: per stage, the
+// containers that worked hardest.
+import std/fs;
+import stats;
+from gatewaymetrics import last_index;
+
+pub struct Sample {
+    at_ms: int,
+    container: string,
+    cpu: float,
+    mem_mib: float,
+}
+
+/// "45.2MiB", "1.1GiB", "812kB" → MiB.
+pub fn mib(s: string) -> float {
+    let t = s.trim();
+    let units: [(string, float)] = [
+        ("GiB", 1024.0),
+        ("MiB", 1.0),
+        ("KiB", 1.0 / 1024.0),
+        ("GB", 953.674),
+        ("MB", 0.953674),
+        ("kB", 0.000953674),
+        ("B", 1.0 / 1048576.0)
+    ];
+    for u in units {
+        if (t.ends_with(u.0)) {
+            return parse_float(t.substring(0, t.len() - u.0.len())).unwrap_or(0.0) * u.1;
+        }
+    }
+    parse_float(t).unwrap_or(0.0)
+}
+
+/// Drops the compose prefix and replica suffix: "raymart-products-1" → "products".
+pub fn short_name(n: string) -> string {
+    var s = n;
+    if (s.starts_with("raymart-")) {
+        s = s.substring(8, s.len());
+    }
+    let i = last_index(s, "-");
+    if (i >= 0 && parse_int(s.substring(i + 1, s.len())).is_some()) {
+        return s.substring(0, i);
+    }
+    s
+}
+
+pub fn parse_samples(csv: string) -> [Sample] {
+    var out: [Sample] = [];
+    for line in csv.split("\n") {
+        let f = line.split(",");
+        if (f.len() < 4) {
+            continue;
+        }
+        match (parse_int(f[0])) {
+            Option.Some(at) => out.push(
+                Sample {
+                    at_ms: at * 1000,
+                    container: short_name(f[1]),
+                    cpu: parse_float(f[2].replace("%", "")).unwrap_or(0.0),
+                    mem_mib: mib(f[3].split("/")[0])
+                }
+            ),
+            Option.None => { },
+        }
+    }
+    out
+}
+
+pub struct Usage {
+    container: string,
+    samples: int,
+    cpu_avg: float,
+    cpu_max: float,
+    mem_max: float,
+}
+
+/// Per container over [from_ms, to_ms], busiest (average CPU) first.
+pub fn usage(samples: [Sample], from_ms: int, to_ms: int) -> [Usage] {
+    var names: [string] = [];
+    var n: [int] = [];
+    var sum: [float] = [];
+    var peak: [float] = [];
+    var mem: [float] = [];
+    for s in samples {
+        if (s.at_ms < from_ms || s.at_ms > to_ms) {
+            continue;
+        }
+        var i = -1;
+        for j in 0..names.len() {
+            if (names[j] == s.container) {
+                i = j;
+            }
+        }
+        if (i < 0) {
+            names.push(s.container);
+            n.push(0);
+            sum.push(0.0);
+            peak.push(0.0);
+            mem.push(0.0);
+            i = names.len() - 1;
+        }
+        n[i] = n[i] + 1;
+        sum[i] = sum[i] + s.cpu;
+        if (s.cpu > peak[i]) {
+            peak[i] = s.cpu;
+        }
+        if (s.mem_mib > mem[i]) {
+            mem[i] = s.mem_mib;
+        }
+    }
+    var out: [Usage] = [];
+    for i in 0..names.len() {
+        out.push(
+            Usage {
+                container: names[i],
+                samples: n[i],
+                cpu_avg: sum[i] / n[i] as float,
+                cpu_max: peak[i],
+                mem_max: mem[i]
+            }
+        );
+    }
+    out.sort_by(fn(a: Usage, b: Usage) -> bool { a.cpu_avg > b.cpu_avg })
+}
+
+pub fn section(samples: [Sample], stages_tsv: string, header: string) -> [string] {
+    var md: [string] = [
+        "",
+        "## Resources",
+        "",
+        header,
+        "",
+        "CPU is % of one core (docker stats; sampled about every 2 s on the host). The five busiest containers per stage:",
+        "",
+        "| stage | VUs | busiest containers — avg CPU % (peak) · peak memory |",
+        "|---|---:|---|"
+    ];
+    for line in stages_tsv.split(
+        "\n"
+    ) {
+        let f = line.split("\t");
+        if (f.len() < 4 || f[0] == "scenario") {
+            continue;
+        }
+        let from_ms = parse_int(f[2]).unwrap_or(0);
+        let to_ms = parse_int(f[3]).unwrap_or(0);
+        let u = usage(samples, from_ms, to_ms);
+        var cells: [string] = [];
+        for i in 0..u.len() {
+            if (i >= 5) {
+                break;
+            }
+            cells.push(
+                "${u[i].container} ${stats.f1(u[i].cpu_avg)} (${stats.f1(u[i].cpu_max)}) · ${stats.f1(u[i].mem_max)} MiB"
+            );
+        }
+        let text = if (cells.len() == 0) { "no samples in this window" } else { cells.join(" — ") };
+        md.push("| ${f[0]} | ${f[1]} | ${text} |");
+    }
+    md
+}
+
+/// Appends the Resources section to <dir>/report.md.
+pub fn run(dir: string) -> int {
+    let csv = fs.read_file(dir + "/docker-stats.csv").unwrap_or("");
+    let tsv = match (fs.read_file(dir + "/stages.tsv")) {
+        Result.Ok(s) => s,
+        Result.Err(e) => {
+            eprint("bench-resources: " + e);
+            return 1;
+        },
+    };
+    let header = fs.read_file(dir + "/env.txt").unwrap_or("").trim();
+    let md = section(parse_samples(csv), tsv, header);
+    match (fs.append_file(dir + "/report.md", md.join("\n") + "\n")) {
+        Result.Ok(_) => 0,
+        Result.Err(e) => {
+            eprint("bench-resources: " + e);
+            1
+        },
+    }
+}

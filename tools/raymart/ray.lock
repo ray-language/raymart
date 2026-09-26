@@ -6,3 +6,9 @@ url = "https://github.com/ray-language/net"
 ref = "v0.3.5"
 commit = "f531ec16365f52604173a8f65bb74d371085750f"
 hash = "sha256:4c240e2ce0d10daad18efde57670c62fab5e28b50bc8265fd1c76e6afb80f776"
+
+[rpc]
+url = "https://github.com/ray-language/rpc"
+ref = "v0.1.0"
+commit = "5d84b61491715531a8fcdce2832b91c105e3d900"
+hash = "sha256:3d6e69ea71cf4e4a4930337e20bf41438e208f40d7e1edf4200348b17c1fe049"

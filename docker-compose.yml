@@ -184,6 +184,21 @@ services:
     depends_on: [raygate]
 
   # ---- tools (not started by `up`; `docker compose run --rm raylogs …`) ----
+  # The load generator (`make bench`): the raymart CLI as a native binary, inside the network
+  # so it can reach the products service directly and its rpc port.
+  bench:
+    profiles: ["bench"]
+    build:
+      <<: *raylang-build
+      args: { APP_DIR: tools/raymart }
+    environment:
+      RAYMART_JWT_SECRET: ${RAYMART_JWT_SECRET:-raymart-dev-secret-change-me}
+      RAYMART_GATEWAY: http://raygate:8080
+      RAYMART_PRODUCTS_HTTP: http://products:8080
+      RAYMART_PRODUCTS_RPC: products:9000
+      RAYMART_RAYQ: rayq:7450
+    volumes: [./perf/results:/out]
+
   raylogs:
     profiles: ["tools"]
     build:

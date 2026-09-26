@@ -2,19 +2,32 @@
 import rpc/rpc;
 import std/json;
 from domain/product import Product, Line, Reserved;
-from application/catalog import Catalog, new_catalog, list_products, get_product, reserve_stock, commit_reservation, release_reservation;
+from application/catalog import
+    Catalog,
+    new_catalog,
+    list_products,
+    get_product,
+    reserve_stock,
+    commit_reservation,
+    release_reservation,
+    restock_product;
 import adapters/outbound/memory;
 import adapters/inbound/rpc as rpc_in;
 
 fn fixture() -> memory.MemoryProducts {
-    memory.new_memory([
-        Product { id: 1, sku: "TR-808", name: "TR-808", price_cents: 129900, stock: 2 },
-        Product { id: 2, sku: "TB-303", name: "TB-303", price_cents: 89900, stock: 5 },
-    ])
+    memory.new_memory(
+        [
+            Product { id: 1, sku: "TR-808", name: "TR-808", price_cents: 129900, stock: 2 },
+            Product { id: 2, sku: "TB-303", name: "TB-303", price_cents: 89900, stock: 5 }
+        ]
+    )
 }
 
 fn stock_of(repo: memory.MemoryProducts, id: int) -> int {
-    match (get_product(new_catalog(repo), id)) { Result.Ok(p) => p.stock, Result.Err(_) => -1 }
+    match (get_product(new_catalog(repo), id)) {
+        Result.Ok(p) => p.stock,
+        Result.Err(_) => -1,
+    }
 }
 
 fn code(r: Result<[Reserved], string>) -> string {
@@ -28,7 +41,10 @@ fn code(r: Result<[Reserved], string>) -> string {
 fn lists_and_finds_products() {
     let c = new_catalog(fixture());
     assert_eq(list_products(c).unwrap_or([]).len(), 2);
-    assert_eq(match (get_product(c, 2)) { Result.Ok(p) => p.sku, Result.Err(_) => "" }, "TB-303");
+    assert_eq(match (get_product(c, 2)) {
+        Result.Ok(p) => p.sku,
+        Result.Err(_) => "",
+    }, "TB-303");
     match (get_product(c, 9)) {
         Result.Err(e) => assert(e.starts_with("not_found")),
         Result.Ok(_) => panic("found a missing product"),
@@ -39,7 +55,11 @@ fn lists_and_finds_products() {
 fn a_reservation_takes_stock_and_keeps_the_price() {
     let repo = fixture();
     let c = new_catalog(repo);
-    let r = reserve_stock(c, "o1", [Line { product_id: 1, qty: 2 }, Line { product_id: 2, qty: 1 }]);
+    let r = reserve_stock(
+        c,
+        "o1",
+        [Line { product_id: 1, qty: 2 }, Line { product_id: 2, qty: 1 }]
+    );
     match (r) {
         Result.Ok(items) => {
             assert_eq(items.len(), 2);
@@ -55,9 +75,13 @@ fn a_reservation_takes_stock_and_keeps_the_price() {
 fn a_reservation_is_all_or_nothing() {
     let repo = fixture();
     let c = new_catalog(repo);
-    let r = reserve_stock(c, "o1", [Line { product_id: 2, qty: 1 }, Line { product_id: 1, qty: 3 }]);
+    let r = reserve_stock(
+        c,
+        "o1",
+        [Line { product_id: 2, qty: 1 }, Line { product_id: 1, qty: 3 }]
+    );
     assert_eq(code(r), "out_of_stock");
-    assert_eq(stock_of(repo, 2), 5); // the first line was not taken either
+    assert_eq(stock_of(repo, 2), 5);  // the first line was not taken either
 }
 
 @test
@@ -90,12 +114,21 @@ fn invalid_reservations_are_refused() {
     let c = new_catalog(fixture());
     assert_eq(code(reserve_stock(c, "o", [])), "invalid");
     assert_eq(code(reserve_stock(c, "o", [Line { product_id: 1, qty: 0 }])), "invalid");
-    assert_eq(code(reserve_stock(c, "o", [Line { product_id: 1, qty: 1 }, Line { product_id: 1, qty: 1 }])), "invalid");
+    assert_eq(
+        code(
+            reserve_stock(c, "o", [Line { product_id: 1, qty: 1 }, Line { product_id: 1, qty: 1 }])
+        ),
+        "invalid"
+    );
     assert_eq(code(reserve_stock(c, " ", [Line { product_id: 1, qty: 1 }])), "invalid");
     assert_eq(code(reserve_stock(c, "o", [Line { product_id: 99, qty: 1 }])), "not_found");
 }
 
-fn call(c: Catalog<memory.MemoryProducts>, method: string, params: string) -> Result<json.Json, string> {
+fn call(
+    c: Catalog<memory.MemoryProducts>,
+    method: string,
+    params: string
+) -> Result<json.Json, string> {
     let p = match (json.parse(params)) {
         Result.Ok(j) => j,
         Result.Err(e) => panic(e),
@@ -123,4 +156,34 @@ fn the_rpc_adapter_speaks_the_catalog() {
         Result.Ok(_) => panic("reserved more than the stock"),
     }
     assert(call(c, "products.nope", `{}`).is_err());
+}
+
+@test
+fn restock_adds_units_within_bounds() {
+    let c = new_catalog(fixture());
+    match (restock_product(c, 1, 10)) {
+        Result.Ok(p) => assert_eq(p.stock, 12),
+        Result.Err(e) => panic(e),
+    }
+    assert_eq(stock_of(c.repo, 1), 12);
+    let refused = [
+        restock_product(c, 1, 0),
+        restock_product(c, 1, -3),
+        restock_product(c, 1, 1000001)
+    ];
+    for r in refused {
+        match (r) {
+            Result.Err(e) => assert(e.starts_with("invalid")),
+            Result.Ok(_) => panic("accepted a bad restock"),
+        }
+    }
+    match (restock_product(c, 99, 1)) {
+        Result.Err(e) => assert(e.starts_with("not_found")),
+        Result.Ok(_) => panic("restocked a missing product"),
+    }
+    match (call(c, "products.restock", `{"id":2,"qty":5}`)) {
+        Result.Ok(j) => assert_eq(json.get_int(j, "stock").unwrap_or(-1), 10),
+        Result.Err(e) => panic(e),
+    }
+    assert(call(c, "products.restock", `{"id":2}`).is_err());
 }

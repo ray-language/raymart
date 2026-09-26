@@ -1,0 +1,50 @@
+import gatewaymetrics as gm;
+
+const BEFORE: string = `# HELP raygate_requests_total requests admitted per route
+# TYPE raygate_requests_total counter
+raygate_requests_total{route="products"} 10
+raygate_upstream_ms_bucket{le="5",route="products"} 8
+raygate_upstream_ms_bucket{le="10",route="products"} 10
+raygate_upstream_ms_bucket{le="25",route="products"} 10
+raygate_upstream_ms_bucket{le="+Inf",route="products"} 10
+raygate_upstream_ms_sum{route="products"} 40
+raygate_upstream_ms_count{route="products"} 10
+`;
+
+const AFTER: string = `raygate_requests_total{route="products"} 110
+raygate_requests_total{route="orders"} 0
+raygate_rate_limited_total{route="products"} 7
+raygate_upstream_ms_bucket{le="5",route="products"} 58
+raygate_upstream_ms_bucket{le="10",route="products"} 100
+raygate_upstream_ms_bucket{le="25",route="products"} 109
+raygate_upstream_ms_bucket{le="50",route="products"} 110
+raygate_upstream_ms_bucket{le="+Inf",route="products"} 110
+raygate_upstream_ms_sum{route="products"} 640
+raygate_upstream_ms_count{route="products"} 110
+`;
+
+@test
+fn parses_samples_and_skips_comments() {
+    let m = gm.parse(BEFORE);
+    assert_eq(m.get("raygate_requests_total{route=\"products\"}").unwrap_or(-1.0), 10.0);
+    assert_eq(m.len(), 7);
+}
+
+@test
+fn diffs_routes_with_traffic() {
+    let d = gm.diff(gm.parse(BEFORE), gm.parse(AFTER), ["products", "orders"]);
+    assert_eq(d.len(), 1);
+    assert_eq(d[0].requests, 100);
+    assert_eq(d[0].rate_limited, 7);
+    assert_eq(d[0].mean_ms, 6.0);
+    assert_eq(d[0].p50_le, "≤ 5");  // 50 of 100 within 5 ms
+    assert_eq(d[0].p95_le, "≤ 25");  // 90 within 10, 99 within 25
+    assert_eq(d[0].p99_le, "≤ 25");
+}
+
+@test
+fn last_index_finds_the_last_separator() {
+    assert_eq(gm.last_index("a b c", " "), 3);
+    assert_eq(gm.last_index("abc", " "), -1);
+    assert_eq(gm.last_index("x-1-2", "-"), 3);
+}

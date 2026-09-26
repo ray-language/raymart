@@ -1,7 +1,7 @@
 // The catalog's use cases, generic over the repository port: the same code runs against
 // PostgreSQL in production and against memory in the tests.
 from domain/ports import ProductRepository;
-from domain/product import Product, Line, Reserved, validate_lines;
+from domain/product import Product, Line, Reserved, validate_lines, validate_restock;
 
 pub struct Catalog<R: ProductRepository> {
     repo: R,
@@ -22,7 +22,11 @@ pub fn get_product<R: ProductRepository>(c: Catalog<R>, id: int) -> Result<Produ
     }
 }
 
-pub fn reserve_stock<R: ProductRepository>(c: Catalog<R>, order_id: string, lines: [Line]) -> Result<[Reserved], string> {
+pub fn reserve_stock<R: ProductRepository>(
+    c: Catalog<R>,
+    order_id: string,
+    lines: [Line]
+) -> Result<[Reserved], string> {
     if (order_id.trim().len() == 0) {
         return Result.Err("invalid: a reservation needs an order id");
     }
@@ -30,10 +34,28 @@ pub fn reserve_stock<R: ProductRepository>(c: Catalog<R>, order_id: string, line
     c.repo.reserve(order_id, lines)
 }
 
-pub fn commit_reservation<R: ProductRepository>(c: Catalog<R>, order_id: string) -> Result<int, string> {
+pub fn commit_reservation<R: ProductRepository>(
+    c: Catalog<R>,
+    order_id: string
+) -> Result<int, string> {
     c.repo.commit(order_id)
 }
 
-pub fn release_reservation<R: ProductRepository>(c: Catalog<R>, order_id: string) -> Result<int, string> {
+pub fn release_reservation<R: ProductRepository>(
+    c: Catalog<R>,
+    order_id: string
+) -> Result<int, string> {
     c.repo.release(order_id)
+}
+
+pub fn restock_product<R: ProductRepository>(
+    c: Catalog<R>,
+    id: int,
+    qty: int
+) -> Result<Product, string> {
+    validate_restock(qty)?;
+    match (c.repo.restock(id, qty)?) {
+        Option.Some(p) => Result.Ok(p),
+        Option.None => Result.Err("not_found: no product ${id}"),
+    }
 }
