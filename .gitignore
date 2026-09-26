@@ -1,0 +1,9 @@
+# dependencies downloaded by the raylang package manager
+.ray-deps/
+# native build output
+/bin/
+**/bin/
+# local runtime data
+*.db
+*.kv
+.DS_Store
