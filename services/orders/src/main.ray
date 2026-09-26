@@ -30,13 +30,14 @@ fn main() -> int {
         return health(http_port);
     }
     let secret = config.required("JWT_SECRET");
-    let repo = mysql_orders.MysqlOrders {
-        host: config.get("MYSQL_HOST", "127.0.0.1"),
-        port: config.get_int("MYSQL_PORT", 3306),
-        user: config.get("MYSQL_USER", "orders"),
-        password: config.get("MYSQL_PASSWORD", "orders"),
-        database: config.get("MYSQL_DATABASE", "orders"),
-    };
+    let repo = mysql_orders.new_orders(
+        config.get("MYSQL_HOST", "127.0.0.1"),
+        config.get_int("MYSQL_PORT", 3306),
+        config.get("MYSQL_USER", "orders"),
+        config.get("MYSQL_PASSWORD", "orders"),
+        config.get("MYSQL_DATABASE", "orders"),
+        config.get_int("MYSQL_POOL_SIZE", 16)
+    );
     match (mysql_orders.migrate(repo, 60)) {
         Result.Ok(_) => logs.info("orders", "", "database ready", []),
         Result.Err(e) => {
@@ -45,14 +46,47 @@ fn main() -> int {
         },
     }
     let deadline = config.get_int("RPC_DEADLINE_MS", 3000);
-    let cart = services_rpc.new_cart_rpc(config.get("CART_HOST", "127.0.0.1"), config.get_int("CART_RPC_PORT", 9000), deadline);
-    let inventory = services_rpc.new_products_rpc(config.get("PRODUCTS_HOST", "127.0.0.1"), config.get_int("PRODUCTS_RPC_PORT", 9000), deadline);
-    let payments = payments_grpc.PaymentsGrpc { host: config.get("PAYMENT_HOST", "127.0.0.1"), port: config.get_int("PAYMENT_GRPC_PORT", 9100), deadline_ms: deadline };
+    let cart = services_rpc.new_cart_rpc(
+        config.get("CART_HOST", "127.0.0.1"),
+        config.get_int("CART_RPC_PORT", 9000),
+        deadline,
+        config.get_int("RPC_POOL_SIZE", 32)
+    );
+    let inventory = services_rpc.new_products_rpc(
+        config.get("PRODUCTS_HOST", "127.0.0.1"),
+        config.get_int("PRODUCTS_RPC_PORT", 9000),
+        deadline,
+        config.get_int("RPC_POOL_SIZE", 32)
+    );
+    let payments = payments_grpc.new_payments_grpc(
+        config.get("PAYMENT_HOST", "127.0.0.1"),
+        config.get_int("PAYMENT_GRPC_PORT", 9100),
+        deadline,
+        2
+    );
     let orders = new_orders(repo, cart, inventory, payments);
-    let queue = rpc.pool(config.get("RAYQ_HOST", "127.0.0.1"), config.get_int("RAYQ_PORT", 7450), 2);
+    // Several consumers apply payment results concurrently (applying one is idempotent: the
+    // order moves with a compare-and-set, stock first); each pulls on its own connection.
+    let consumers = config.get_int("QUEUE_CONSUMERS", 4);
+    let queue = rpc.pool(
+        config.get("RAYQ_HOST", "127.0.0.1"),
+        config.get_int("RAYQ_PORT", 7450),
+        consumers + 1
+    );
 
-    let _relay = spawn(fn() { workers.relay_forever(orders, config.get_int("OUTBOX_TICK_MS", 500)); });
-    let _results = spawn(fn() { workers.consume_forever(orders, queue, 300); });
+    let _relay = spawn(fn() {
+        workers.relay_forever(
+            orders,
+            config.get_int("OUTBOX_TICK_MS", 100),
+            config.get_int("OUTBOX_BATCH", 50)
+        );
+    });
+    let idle_ms = config.get_int("QUEUE_IDLE_MS", 100);
+    for _ in 0..consumers {
+        spawn(fn() {
+            workers.consume_forever(orders, queue, idle_ms);
+        });
+    }
     logs.info("orders", "", "serving", [("http", to_string(http_port))]);
     match (web.listen_graceful(fn() -> web.App { http_in.build(orders, secret) }, "0.0.0.0", http_port, 3000)) {
         Result.Ok(_) => 0,

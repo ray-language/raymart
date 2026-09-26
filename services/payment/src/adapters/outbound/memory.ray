@@ -33,7 +33,20 @@ impl IntentRepository for MemoryIntents {
                 if (i.status != from) {
                     return Result.Ok(false);
                 }
-                self.intents.insert(id, Intent { id: i.id, order_id: i.order_id, user_id: i.user_id, amount_cents: i.amount_cents, currency: i.currency, card_last4: i.card_last4, status: to, reason: reason, created_ms: i.created_ms });
+                self.intents.insert(
+                    id,
+                    Intent {
+                        id: i.id,
+                        order_id: i.order_id,
+                        user_id: i.user_id,
+                        amount_cents: i.amount_cents,
+                        currency: i.currency,
+                        card_last4: i.card_last4,
+                        status: to,
+                        reason: reason,
+                        created_ms: i.created_ms
+                    }
+                );
                 Result.Ok(true)
             },
             Option.None => Result.Ok(false),

@@ -1,28 +1,47 @@
 // The MySQL adapter against the container (docker-compose.test.yml). Skipped unless RAYMART_IT=1.
+import db/mysql;
 import std/crypto;
 import std/hex;
 from domain/ports import OrderRepository;
 from domain/order import Order, OrderItem, OutboxEntry, new_order, PENDING, PAID;
 import adapters/outbound/mysql_orders;
 
+/// Where the test stores are published: 127.0.0.1 from the host, host.docker.internal from
+/// a container (make check-release-it).
+fn it_host() -> string {
+    env("RAYMART_IT_HOST").unwrap_or("127.0.0.1")
+}
+
 fn enabled() -> bool {
     env("RAYMART_IT").unwrap_or("") == "1"
 }
 
 fn repo() -> mysql_orders.MysqlOrders {
-    mysql_orders.MysqlOrders { host: "127.0.0.1", port: 53306, user: "orders", password: "orders", database: "orders" }
+    mysql_orders.new_orders(it_host(), 53306, "orders", "orders", "orders", 4)
 }
 
 fn fresh(user: string) -> Order {
     let id = "it-" + hex.hex_encode(crypto.random_bytes(8));
-    match (new_order(id, user, [OrderItem { product_id: 1, name: "TR-808", price_cents: 129900, qty: 1 }, OrderItem { product_id: 5, name: "Cable", price_cents: 990, qty: 3 }], 1000)) {
+    match (new_order(
+        id,
+        user,
+        [
+            OrderItem { product_id: 1, name: "TR-808", price_cents: 129900, qty: 1 },
+            OrderItem { product_id: 5, name: "Cable", price_cents: 990, qty: 3 }
+        ],
+        1000
+    )) {
         Result.Ok(o) => o,
         Result.Err(e) => panic(e),
     }
 }
 
 fn outbox_has(order_id: string) -> bool {
-    repo().pending_outbox(1000).unwrap_or([]).filter(fn(e: OutboxEntry) -> bool { e.order_id == order_id }).len() == 1
+    repo()
+        .pending_outbox(1000)
+        .unwrap_or([])
+        .filter(fn(e: OutboxEntry) -> bool { e.order_id == order_id })
+        .len() == 1
 }
 
 @test
@@ -71,9 +90,53 @@ fn mysql_outbox_is_delivered_once() {
     }
     let o = fresh("it-user");
     let _ = repo().create(o, "payment.requested", "{}");
-    let mine = repo().pending_outbox(1000).unwrap_or([]).filter(fn(e: OutboxEntry) -> bool { e.order_id == o.id });
+    let mine = repo()
+        .pending_outbox(1000)
+        .unwrap_or([])
+        .filter(fn(e: OutboxEntry) -> bool { e.order_id == o.id });
     assert_eq(mine.len(), 1);
     let _ = repo().mark_sent(mine[0].id);
     assert(!outbox_has(o.id));
     assert(repo().list_for("it-user").unwrap_or([]).len() >= 3);
+}
+
+// Connections the server closed while idle are replaced: reads retry on a fresh connection, and
+// a checkout whose transaction cannot even begin is retried too (nothing was written yet).
+@test
+fn mysql_survives_connections_killed_by_the_server() {
+    if (!enabled()) {
+        return;
+    }
+    let r = mysql_orders.new_orders(it_host(), 53306, "orders", "orders", "orders", 1);
+    let o = fresh("it-kill");
+    assert(r.create(o, "payment.requested", "{}").is_ok());
+    kill_other_connections();
+    match (r.find(o.id)) {
+        Result.Ok(found) => assert(found.is_some()),
+        Result.Err(e) => panic("a killed pooled connection surfaced on read: " + e),
+    }
+    kill_other_connections();
+    match (r.create(fresh("it-kill"), "payment.requested", "{}")) {
+        Result.Ok(_) => { },
+        Result.Err(e) => panic("a killed pooled connection surfaced on create: " + e),
+    }
+}
+
+fn kill_other_connections() {
+    let admin = match (mysql.connect(it_host(), 53306, "orders", "orders", "orders")) {
+        Result.Ok(c) => c,
+        Result.Err(e) => panic(e),
+    };
+    let rows = match (mysql.query(
+        admin,
+        "SELECT id FROM information_schema.processlist WHERE user = 'orders' AND id <> CONNECTION_ID()",
+        []
+    )) {
+        Result.Ok(r) => r,
+        Result.Err(e) => panic(e),
+    };
+    for row in rows {
+        let _ = mysql.exec(admin, "KILL " + row[0], []);
+    }
+    mysql.disconnect(admin);
 }

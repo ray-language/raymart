@@ -11,7 +11,11 @@ import adapters/outbound/card_simulator;
 import adapters/inbound/grpc as grpc_in;
 
 fn start() -> int {
-    let p = new_payments(memory.new_memory_intents(), card_simulator.new_card_simulator(), memory.new_memory_bus());
+    let p = new_payments(
+        memory.new_memory_intents(),
+        card_simulator.new_card_simulator(),
+        memory.new_memory_bus()
+    );
     let l = match (server.bind("127.0.0.1", 0)) {
         Result.Ok(l) => l,
         Result.Err(e) => panic(e),
@@ -30,8 +34,21 @@ fn md(tp: string) -> Map<string, string> {
 }
 
 fn create(port: int, order: string, amount: int, card: string) -> client.Reply {
-    let req = paymentpb.CreateIntentRequest { order_id: order, amount_cents: amount, currency: "USD", card_last4: card, user_id: "ada" };
-    match (client.call_once("127.0.0.1", port, paymentpb.CREATE_INTENT, paymentpb.encode_create(req), md("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"), 3000)) {
+    let req = paymentpb.CreateIntentRequest {
+        order_id: order,
+        amount_cents: amount,
+        currency: "USD",
+        card_last4: card,
+        user_id: "ada"
+    };
+    match (client.call_once(
+        "127.0.0.1",
+        port,
+        paymentpb.CREATE_INTENT,
+        paymentpb.encode_create(req),
+        md("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+        3000
+    )) {
         Result.Ok(r) => r,
         Result.Err(e) => panic(e),
     }
@@ -61,23 +78,61 @@ fn the_payment_grpc_contract() {
         Result.Ok(c) => c,
         Result.Err(e) => panic(e),
     };
-    let req = paymentpb.CreateIntentRequest { order_id: "o9", amount_cents: 500, currency: "USD", card_last4: "4242", user_id: "ada" };
+    let req = paymentpb.CreateIntentRequest {
+        order_id: "o9",
+        amount_cents: 500,
+        currency: "USD",
+        card_last4: "4242",
+        user_id: "ada"
+    };
     let made = match (client.call(conn, paymentpb.CREATE_INTENT, paymentpb.encode_create(req), md(""), 3000)) {
-        Result.Ok(r) => match (paymentpb.decode_intent(r.message)) { Result.Ok(i) => i.id, Result.Err(_) => "" },
+        Result.Ok(r) => match (paymentpb.decode_intent(r.message)) {
+            Result.Ok(i) => i.id,
+            Result.Err(_) => "",
+        },
         Result.Err(e) => panic(e),
     };
-    let got = match (client.call(conn, paymentpb.GET_INTENT, paymentpb.encode_get(paymentpb.GetIntentRequest { id: made }), md(""), 3000)) {
+    let got = match (client.call(
+        conn,
+        paymentpb.GET_INTENT,
+        paymentpb.encode_get(paymentpb.GetIntentRequest { id: made }),
+        md(""),
+        3000
+    )) {
         Result.Ok(r) => r,
         Result.Err(e) => panic(e),
     };
     client.disconnect(conn);
     assert_eq(got.status, 0);
-    assert_eq(match (paymentpb.decode_intent(got.message)) { Result.Ok(i) => i.amount_cents, Result.Err(_) => 0 }, 500);
+    assert_eq(match (paymentpb.decode_intent(got.message)) {
+        Result.Ok(i) => i.amount_cents,
+        Result.Err(_) => 0,
+    }, 500);
 
     // Domain errors become gRPC codes.
-    assert_eq(create(port, "o2", 0, "4242").status, 3); // INVALID_ARGUMENT
-    let missing = client.call_once("127.0.0.1", port, paymentpb.GET_INTENT, paymentpb.encode_get(paymentpb.GetIntentRequest { id: "nope" }), md(""), 3000);
-    assert_eq(match (missing) { Result.Ok(r) => r.status, Result.Err(_) => -1 }, 5); // NOT_FOUND
-    let unknown = client.call_once("127.0.0.1", port, "/raymart.payment.v1.Payments/Refund", b"", md(""), 3000);
-    assert_eq(match (unknown) { Result.Ok(r) => r.status, Result.Err(_) => -1 }, 12); // UNIMPLEMENTED
+    assert_eq(create(port, "o2", 0, "4242").status, 3);  // INVALID_ARGUMENT
+    let missing = client.call_once(
+        "127.0.0.1",
+        port,
+        paymentpb.GET_INTENT,
+        paymentpb.encode_get(paymentpb.GetIntentRequest { id: "nope" }),
+        md(""),
+        3000
+    );
+    assert_eq(match (missing) {
+        Result.Ok(r) => r.status,  // NOT_FOUND
+        Result.Err(_) => -1,
+    }, 5);
+    let unknown = client.call_once(
+        "127.0.0.1",
+        port,
+        "/raymart.payment.v1.Payments/Refund",
+        b"",
+        md(""),
+        3000
+    );
+    assert_eq(match (unknown) {
+        Result.Ok(r) => r.status,  // UNIMPLEMENTED
+        Result.Err(_) => -1,
+    }, 12);
 }

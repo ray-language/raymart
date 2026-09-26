@@ -9,7 +9,10 @@ from domain/ports import IntentRepository, CardProcessor, Bus;
 from domain/intent import to_json;
 from application/payments import Payments, get_intent;
 
-pub fn build<R: IntentRepository, C: CardProcessor, B: Bus>(payments: Payments<R, C, B>, jwt_secret: string) -> web.App {
+pub fn build<R: IntentRepository, C: CardProcessor, B: Bus>(
+    payments: Payments<R, C, B>,
+    jwt_secret: string
+) -> web.App {
     let app = web.new_app();
     web.GET(app, "/health", fn(ctx: web.Ctx, res: web.Res) {
         httpx.ok(res, `{"status":"ok","service":"payment"}`);

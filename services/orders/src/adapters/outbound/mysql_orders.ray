@@ -1,6 +1,8 @@
-// OrderRepository on MySQL. One connection per operation (never shared across request
-// fibers); the order, its items and its outbox message are written in ONE transaction.
+// OrderRepository on MySQL over a pool of connections (common/pool.ray): each operation checks
+// a connection out and gives it back — or closes it if the wire failed. The order, its items
+// and its outbox message are written in ONE transaction.
 import db/mysql;
+import common/pool;
 import std/time;
 from domain/ports import OrderRepository;
 from domain/order import Order, OrderItem, OutboxEntry;
@@ -11,12 +13,134 @@ pub struct MysqlOrders {
     user: string,
     password: string,
     database: string,
+    conns: Channel<MySlot>,
+}
+
+/// A pool slot (common/pool.ray): an idle connection, or one to dial.
+pub enum MySlot {
+    Ready(mysql.Conn),
+    Empty,
+}
+
+/// The repository with a pool of up to `pool_size` connections (dialed on demand).
+pub fn new_orders(
+    host: string,
+    port: int,
+    user: string,
+    password: string,
+    database: string,
+    pool_size: int
+) -> MysqlOrders {
+    let n = if (pool_size < 1) { 1 } else { pool_size };
+    let slots: Channel<MySlot> = Channel.bounded(n);
+    for _ in 0..n {
+        send(slots, MySlot.Empty);
+    }
+    MysqlOrders {
+        host: host,
+        port: port,
+        user: user,
+        password: password,
+        database: database,
+        conns: slots
+    }
 }
 
 fn open(r: MysqlOrders) -> Result<mysql.Conn, string> {
     match (mysql.connect(r.host, r.port, r.user, r.password, r.database)) {
         Result.Ok(c) => Result.Ok(c),
         Result.Err(e) => Result.Err("unavailable: orders database: " + e),
+    }
+}
+
+/// A checked-out connection, and whether it was reused (it may have gone stale while idle).
+struct MyLease {
+    conn: mysql.Conn,
+    reused: bool,
+}
+
+fn checkout(r: MysqlOrders) -> Result<MyLease, string> {
+    match (recv(r.conns)) {
+        Option.None => Result.Err("unavailable: orders database: the pool is closed"),
+        Option.Some(slot) => match (slot) {
+            MySlot.Ready(c) => Result.Ok(MyLease { conn: c, reused: true }),
+            MySlot.Empty => match (open(r)) {
+                Result.Ok(c) => Result.Ok(MyLease { conn: c, reused: false }),
+                Result.Err(e) => {
+                    send(r.conns, MySlot.Empty);
+                    Result.Err(e)
+                },
+            },
+        },
+    }
+}
+
+/// Gives `c` back after an operation; a wire error closes it and empties its slot instead.
+fn give_back(r: MysqlOrders, c: mysql.Conn, error: string) {
+    if (error == "" || pool.connection_ok(error)) {
+        // db/mysql never compacts its read buffer (RAYLANG-FINDINGS #72): a pooled connection
+        // would keep every byte it ever read — and copy it all whenever it crosses the channel.
+        // Between operations the buffer is fully consumed, so it can simply start over.
+        if (c.pos >= c.buf.len()) {
+            c.buf = [];
+            c.pos = 0;
+        }
+        send(r.conns, MySlot.Ready(c));
+    } else {
+        mysql.disconnect(c);
+        send(r.conns, MySlot.Empty);
+    }
+}
+
+/// Runs `op` on a pooled connection. With `retry` (idempotent operations only), a reused
+/// connection that fails on the wire is replaced and `op` runs once more (common/pool.ray).
+fn with_conn<T>(
+    r: MysqlOrders,
+    retry: bool,
+    op: fn(mysql.Conn) -> Result<T, string>
+) -> Result<T, string> {
+    let lease = checkout(r)?;
+    let out = op(lease.conn);
+    let error = pool.error_of(out);
+    if (retry && pool.retry_on_fresh(error, lease.reused)) {
+        mysql.disconnect(lease.conn);
+        return match (open(r)) {
+            Result.Ok(c) => {
+                let again = op(c);
+                give_back(r, c, pool.error_of(again));
+                again
+            },
+            Result.Err(e) => {
+                send(r.conns, MySlot.Empty);
+                Result.Err(e)
+            },
+        };
+    }
+    give_back(r, lease.conn, error);
+    out
+}
+
+// The order, its items and its outbox message in one transaction. Err("begin: …") when the
+// transaction could not even start: nothing was written, so a retry is safe.
+fn create_tx(
+    c: mysql.Conn,
+    order: Order,
+    outbox_kind: string,
+    outbox_payload: string
+) -> Result<int, string> {
+    match (mysql.exec(c, "START TRANSACTION", [])) {
+        Result.Ok(_) => { },
+        Result.Err(e) => return Result.Err("begin: " + e),
+    }
+    match (create_on(c, order, outbox_kind, outbox_payload)) {
+        Result.Ok(n) => match (mysql.exec(c, "COMMIT", [])) {
+            Result.Ok(_) => Result.Ok(n),
+            Result.Err(e) => Result.Err(e),
+        },
+        Result.Err(e) => {
+            let _ = mysql.exec(c, "ROLLBACK", []);
+            Result.Err(e)
+        },
     }
 }
 
@@ -72,34 +196,59 @@ fn migrate_on(c: mysql.Conn) -> Result<int, string> {
 }
 
 fn create_on(c: mysql.Conn, o: Order, kind: string, payload: string) -> Result<int, string> {
-    mysql.exec(c, "INSERT INTO orders (id, user_id, status, total_cents, created_ms) VALUES (?, ?, ?, ?, ?)", [o.id, o.user_id, o.status, to_string(o.total_cents), to_string(o.created_ms)])?;
+    mysql.exec(
+        c,
+        "INSERT INTO orders (id, user_id, status, total_cents, created_ms) VALUES (?, ?, ?, ?, ?)",
+        [o.id, o.user_id, o.status, to_string(o.total_cents), to_string(o.created_ms)]
+    )?;
     for it in o.items {
-        mysql.exec(c, "INSERT INTO order_items (order_id, product_id, name, price_cents, qty) VALUES (?, ?, ?, ?, ?)", [o.id, to_string(it.product_id), it.name, to_string(it.price_cents), to_string(it.qty)])?;
+        mysql.exec(
+            c,
+            "INSERT INTO order_items (order_id, product_id, name, price_cents, qty) VALUES (?, ?, ?, ?, ?)",
+            [o.id, to_string(it.product_id), it.name, to_string(it.price_cents), to_string(it.qty)]
+        )?;
     }
-    mysql.exec(c, "INSERT INTO outbox (order_id, kind, payload, created_ms) VALUES (?, ?, ?, ?)", [o.id, kind, payload, to_string(o.created_ms)])?;
+    mysql.exec(
+        c,
+        "INSERT INTO outbox (order_id, kind, payload, created_ms) VALUES (?, ?, ?, ?)",
+        [o.id, kind, payload, to_string(o.created_ms)]
+    )?;
     Result.Ok(1)
 }
 
 fn items_of(c: mysql.Conn, order_id: string) -> Result<[OrderItem], string> {
-    let rows = mysql.query(c, "SELECT product_id, name, price_cents, qty FROM order_items WHERE order_id = ? ORDER BY product_id", [order_id])?;
+    let rows = mysql.query(
+        c,
+        "SELECT product_id, name, price_cents, qty FROM order_items WHERE order_id = ? ORDER BY product_id",
+        [order_id]
+    )?;
     var out: [OrderItem] = [];
     for row in rows {
-        out.push(OrderItem { product_id: to_int(row[0]), name: row[1], price_cents: to_int(row[2]), qty: to_int(row[3]) });
+        out.push(
+            OrderItem {
+                product_id: to_int(row[0]),
+                name: row[1],
+                price_cents: to_int(row[2]),
+                qty: to_int(row[3])
+            }
+        );
     }
     Result.Ok(out)
 }
 
 fn order_of(c: mysql.Conn, row: [string]) -> Result<Order, string> {
-    Result.Ok(Order {
-        id: row[0],
-        user_id: row[1],
-        status: row[2],
-        items: items_of(c, row[0])?,
-        total_cents: to_int(row[3]),
-        created_ms: to_int(row[4]),
-        payment_id: row[5],
-        reason: row[6],
-    })
+    Result.Ok(
+        Order {
+            id: row[0],
+            user_id: row[1],
+            status: row[2],
+            items: items_of(c, row[0])?,
+            total_cents: to_int(row[3]),
+            created_ms: to_int(row[4]),
+            payment_id: row[5],
+            reason: row[6]
+        }
+    )
 }
 
 const COLUMNS: string = "id, user_id, status, total_cents, created_ms, payment_id, reason";
@@ -114,7 +263,11 @@ fn find_on(c: mysql.Conn, id: string) -> Result<Option<Order>, string> {
 
 fn list_on(c: mysql.Conn, user: string) -> Result<[Order], string> {
     var out: [Order] = [];
-    for row in mysql.query(c, "SELECT ${COLUMNS} FROM orders WHERE user_id = ? ORDER BY created_ms DESC LIMIT 50", [user])? {
+    for row in mysql.query(
+        c,
+        "SELECT ${COLUMNS} FROM orders WHERE user_id = ? ORDER BY created_ms DESC LIMIT 50",
+        [user]
+    )? {
         out.push(order_of(c, row)?);
     }
     Result.Ok(out)
@@ -122,65 +275,81 @@ fn list_on(c: mysql.Conn, user: string) -> Result<[Order], string> {
 
 fn outbox_on(c: mysql.Conn, limit: int) -> Result<[OutboxEntry], string> {
     var out: [OutboxEntry] = [];
-    for row in mysql.query(c, "SELECT id, order_id, kind, payload FROM outbox WHERE sent_ms IS NULL ORDER BY id LIMIT ${limit}", [])? {
-        out.push(OutboxEntry { id: to_int(row[0]), order_id: row[1], kind: row[2], payload: row[3] });
+    for row in mysql.query(
+        c,
+        "SELECT id, order_id, kind, payload FROM outbox WHERE sent_ms IS NULL ORDER BY id LIMIT ${limit}",
+        []
+    )? {
+        out.push(
+            OutboxEntry { id: to_int(row[0]), order_id: row[1], kind: row[2], payload: row[3] }
+        );
     }
     Result.Ok(out)
 }
 
 impl OrderRepository for MysqlOrders {
     fn create(self, order: Order, outbox_kind: string, outbox_payload: string) -> Result<int, string> {
-        let c = open(self)?;
-        let r = match (mysql.exec(c, "START TRANSACTION", [])) {
-            Result.Ok(_) => create_on(c, order, outbox_kind, outbox_payload),
-            Result.Err(e) => Result.Err(e),
-        };
-        let done: Result<int, string> = match (r) {
-            Result.Ok(n) => match (mysql.exec(c, "COMMIT", [])) {
-                Result.Ok(_) => Result.Ok(n),
-                Result.Err(e) => Result.Err(e),
-            },
-            Result.Err(e) => {
-                let _ = mysql.exec(c, "ROLLBACK", []);
-                Result.Err(e)
-            },
-        };
-        mysql.disconnect(c);
-        done
+        // Not idempotent (a lost COMMIT acknowledgement must not become a second attempt), so a
+        // stale connection is only replaced when the transaction could not even begin.
+        let lease = checkout(self)?;
+        let out = create_tx(lease.conn, order, outbox_kind, outbox_payload);
+        let error = pool.error_of(out);
+        if (lease.reused && error.starts_with("begin: ")) {
+            mysql.disconnect(lease.conn);
+            return match (open(self)) {
+                Result.Ok(c) => {
+                    let again = create_tx(c, order, outbox_kind, outbox_payload);
+                    give_back(self, c, pool.error_of(again));
+                    again
+                },
+                Result.Err(e) => {
+                    send(self.conns, MySlot.Empty);
+                    Result.Err(e)
+                },
+            };
+        }
+        give_back(self, lease.conn, error);
+        out
     }
 
     fn find(self, id: string) -> Result<Option<Order>, string> {
-        let c = open(self)?;
-        let r = find_on(c, id);
-        mysql.disconnect(c);
-        r
+        with_conn(self, true, fn(c: mysql.Conn) -> Result<Option<Order>, string> { find_on(c, id) })
     }
 
     fn list_for(self, user_id: string) -> Result<[Order], string> {
-        let c = open(self)?;
-        let r = list_on(c, user_id);
-        mysql.disconnect(c);
-        r
+        with_conn(self, true, fn(c: mysql.Conn) -> Result<[Order], string> { list_on(c, user_id) })
     }
 
-    fn transition(self, id: string, from: string, to: string, payment_id: string, reason: string) -> Result<bool, string> {
-        let c = open(self)?;
-        let r = mysql.exec(c, "UPDATE orders SET status = ?, payment_id = ?, reason = ? WHERE id = ? AND status = ?", [to, payment_id, reason, id, from]);
-        mysql.disconnect(c);
-        Result.Ok(r? == 1)
+    fn transition(
+        self,
+        id: string,
+        from: string,
+        to: string,
+        payment_id: string,
+        reason: string
+    ) -> Result<bool, string> {
+        // A compare-and-set: running it twice cannot move the order twice.
+        let n = with_conn(self, true, fn(c: mysql.Conn) -> Result<int, string> {
+            mysql.exec(
+                c,
+                "UPDATE orders SET status = ?, payment_id = ?, reason = ? WHERE id = ? AND status = ?",
+                [to, payment_id, reason, id, from]
+            )
+        })?;
+        Result.Ok(n == 1)
     }
 
     fn pending_outbox(self, limit: int) -> Result<[OutboxEntry], string> {
-        let c = open(self)?;
-        let r = outbox_on(c, limit);
-        mysql.disconnect(c);
-        r
+        with_conn(self, true, fn(c: mysql.Conn) -> Result<[OutboxEntry], string> { outbox_on(c, limit) })
     }
 
     fn mark_sent(self, outbox_id: int) -> Result<int, string> {
-        let c = open(self)?;
-        let r = mysql.exec(c, "UPDATE outbox SET sent_ms = ? WHERE id = ?", [to_string(time.now()), to_string(outbox_id)]);
-        mysql.disconnect(c);
-        r
+        with_conn(self, true, fn(c: mysql.Conn) -> Result<int, string> {
+            mysql.exec(
+                c,
+                "UPDATE outbox SET sent_ms = ? WHERE id = ?",
+                [to_string(time.now()), to_string(outbox_id)]
+            )
+        })
     }
 }

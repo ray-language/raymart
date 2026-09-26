@@ -6,6 +6,12 @@ from domain/ports import CartStore;
 from domain/cart import Cart, Item;
 import adapters/outbound/raykv_store;
 
+/// Where the test stores are published: 127.0.0.1 from the host, host.docker.internal from
+/// a container (make check-release-it).
+fn it_host() -> string {
+    env("RAYMART_IT_HOST").unwrap_or("127.0.0.1")
+}
+
 fn enabled() -> bool {
     env("RAYMART_IT").unwrap_or("") == "1"
 }
@@ -19,9 +25,12 @@ fn raykv_saves_loads_and_clears_a_cart() {
     if (!enabled()) {
         return;
     }
-    let s = raykv_store.RaykvCarts { host: "127.0.0.1", port: 57379, ttl_s: 60 };
+    let s = raykv_store.new_carts_store(it_host(), 57379, 60, 2);
     let u = user();
-    let cart = Cart { user_id: u, items: [Item { product_id: 5, name: "Cable", price_cents: 990, qty: 3 }] };
+    let cart = Cart {
+        user_id: u,
+        items: [Item { product_id: 5, name: "Cable", price_cents: 990, qty: 3 }]
+    };
     assert_eq(s.save(cart).unwrap_or(-1), 1);
     match (s.load(u)) {
         Result.Ok(c) => {
@@ -31,7 +40,10 @@ fn raykv_saves_loads_and_clears_a_cart() {
         Result.Err(e) => panic(e),
     }
     assert_eq(s.clear(u).unwrap_or(-1), 1);
-    assert_eq(match (s.load(u)) { Result.Ok(c) => c.items.len(), Result.Err(_) => -1 }, 0);
+    assert_eq(match (s.load(u)) {
+        Result.Ok(c) => c.items.len(),
+        Result.Err(_) => -1,
+    }, 0);
 }
 
 @test
@@ -39,9 +51,17 @@ fn raykv_carts_expire() {
     if (!enabled()) {
         return;
     }
-    let s = raykv_store.RaykvCarts { host: "127.0.0.1", port: 57379, ttl_s: 1 };
+    let s = raykv_store.new_carts_store(it_host(), 57379, 1, 2);
     let u = user();
-    let _ = s.save(Cart { user_id: u, items: [Item { product_id: 5, name: "Cable", price_cents: 990, qty: 1 }] });
+    let _ = s.save(
+        Cart {
+            user_id: u,
+            items: [Item { product_id: 5, name: "Cable", price_cents: 990, qty: 1 }]
+        }
+    );
     time.sleep(2100);
-    assert_eq(match (s.load(u)) { Result.Ok(c) => c.items.len(), Result.Err(_) => -1 }, 0);
+    assert_eq(match (s.load(u)) {
+        Result.Ok(c) => c.items.len(),
+        Result.Err(_) => -1,
+    }, 0);
 }

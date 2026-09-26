@@ -1,7 +1,9 @@
 // CartStore on raykv (the RESP key-value server of ray-apps; plain Redis works too): each cart
 // is one JSON value under `cart:<user>`, written with an expiry so abandoned carts go away on
-// their own. One connection per operation — never shared between request fibers.
+// their own. Connections come from a pool (common/pool.ray): checked out per command and given
+// back, or closed when the wire failed.
 import net/redis;
+import common/pool;
 import std/json;
 from domain/ports import CartStore;
 from domain/cart import Cart, empty, to_json, from_json;
@@ -10,21 +12,82 @@ pub struct RaykvCarts {
     host: string,
     port: int,
     ttl_s: int,
+    conns: Channel<KvSlot>,
+}
+
+/// A pool slot (common/pool.ray): an idle connection, or one to dial.
+pub enum KvSlot {
+    Ready(redis.Conn),
+    Empty,
+}
+
+/// The store with a pool of up to `pool_size` connections (dialed on demand).
+pub fn new_carts_store(host: string, port: int, ttl_s: int, pool_size: int) -> RaykvCarts {
+    let n = if (pool_size < 1) { 1 } else { pool_size };
+    let slots: Channel<KvSlot> = Channel.bounded(n);
+    for _ in 0..n {
+        send(slots, KvSlot.Empty);
+    }
+    RaykvCarts { host: host, port: port, ttl_s: ttl_s, conns: slots }
 }
 
 fn key(user: string) -> string {
     "cart:" + user
 }
 
+/// A checked-out connection, and whether it was reused (it may have gone stale while idle).
+struct KvLease {
+    conn: redis.Conn,
+    reused: bool,
+}
+
+fn checkout(s: RaykvCarts) -> Result<KvLease, string> {
+    match (recv(s.conns)) {
+        Option.None => Result.Err("unavailable: cart store: the pool is closed"),
+        Option.Some(slot) => match (slot) {
+            KvSlot.Ready(c) => Result.Ok(KvLease { conn: c, reused: true }),
+            KvSlot.Empty => match (redis.connect(s.host, s.port)) {
+                Result.Ok(c) => Result.Ok(KvLease { conn: c, reused: false }),
+                Result.Err(e) => {
+                    send(s.conns, KvSlot.Empty);
+                    Result.Err("unavailable: cart store: " + e)
+                },
+            },
+        },
+    }
+}
+
+// GET, SET and DEL are idempotent: a reused connection that fails on the wire (the server
+// restarted, or closed it while idle) is replaced and the command runs once more on a freshly
+// dialed connection (common/pool.ray). A server-side error reply (Reply.Err) leaves the
+// connection in sync; a transport error does not.
 fn with_conn(s: RaykvCarts, args: [string]) -> Result<redis.Reply, string> {
-    let c = match (redis.connect(s.host, s.port)) {
-        Result.Ok(c) => c,
-        Result.Err(e) => return Result.Err("unavailable: cart store: " + e),
-    };
-    let r = redis.command(c, args);
-    redis.close_conn(c);
+    let lease = checkout(s)?;
+    var r = redis.command(lease.conn, args);
+    var conn = lease.conn;
+    if (r.is_err() && lease.reused) {
+        redis.close_conn(conn);
+        match (redis.connect(s.host, s.port)) {
+            Result.Ok(fresh) => {
+                conn = fresh;
+                r = redis.command(conn, args);
+            },
+            Result.Err(e) => {
+                send(s.conns, KvSlot.Empty);
+                return Result.Err("unavailable: cart store: " + e);
+            },
+        }
+    }
+    match (r) {
+        Result.Ok(_) => send(s.conns, KvSlot.Ready(conn)),
+        Result.Err(_) => {
+            redis.close_conn(conn);
+            send(s.conns, KvSlot.Empty);
+        },
+    }
     match (r) {
         Result.Ok(redis.Reply.Err(e)) => Result.Err("unavailable: cart store: " + e),
+        Result.Err(e) => Result.Err("unavailable: cart store: " + e),
         other => other,
     }
 }
@@ -41,7 +104,10 @@ impl CartStore for RaykvCarts {
         if (cart.items.len() == 0) {
             return self.clear(cart.user_id);
         }
-        let _ = with_conn(self, ["SET", key(cart.user_id), json.stringify(to_json(cart)), "EX", to_string(self.ttl_s)])?;
+        let _ = with_conn(
+            self,
+            ["SET", key(cart.user_id), json.stringify(to_json(cart)), "EX", to_string(self.ttl_s)]
+        )?;
         Result.Ok(cart.items.len())
     }
 

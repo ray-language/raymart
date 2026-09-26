@@ -78,6 +78,7 @@ services:
       PG_USER: products
       PG_PASSWORD: products
       PG_DATABASE: products
+      PG_POOL_SIZE: ${PG_POOL_SIZE:-16}
       HTTP_PORT: "8080"
       RPC_PORT: "9000"
     depends_on:
@@ -95,6 +96,7 @@ services:
       <<: *jwt
       RAYKV_HOST: raykv
       RAYKV_PORT: "7379"
+      RAYKV_POOL_SIZE: ${RAYKV_POOL_SIZE:-64}
       PRODUCTS_HOST: products
       PRODUCTS_RPC_PORT: "9000"
       HTTP_PORT: "8080"
@@ -117,6 +119,7 @@ services:
       MYSQL_USER: orders
       MYSQL_PASSWORD: orders
       MYSQL_DATABASE: orders
+      MYSQL_POOL_SIZE: ${MYSQL_POOL_SIZE:-16}
       CART_HOST: cart
       CART_RPC_PORT: "9000"
       PRODUCTS_HOST: products
@@ -146,6 +149,7 @@ services:
       MONGO_USER: payments
       MONGO_PASSWORD: payments
       MONGO_DATABASE: payments
+      MONGO_POOL_SIZE: ${MONGO_POOL_SIZE:-8}
       RAYQ_HOST: rayq
       RAYQ_PORT: "7450"
       HTTP_PORT: "8080"
@@ -162,7 +166,7 @@ services:
   raygate:
     build:
       <<: *raylang-build
-      args: { APP_REPO: "https://github.com/ray-language/raygate.git", APP_REF: "e94c0ce" }
+      args: { APP_REPO: "https://github.com/ray-language/raygate.git", APP_REF: "c58903b" }
     command: ["--config", "/etc/raygate/raygate.toml"]
     volumes: [./config/raygate.toml:/etc/raygate/raygate.toml:ro]
     ports: ["127.0.0.1:8088:8080"]
