@@ -14,12 +14,12 @@ x-raylang-build: &raylang-build
 services:
   # ---- infrastructure ----
   postgres:
-    image: postgres:16
+    image: postgres:18
     environment:
       POSTGRES_USER: products
       POSTGRES_PASSWORD: products
       POSTGRES_DB: products
-    volumes: [postgres-data:/var/lib/postgresql/data]
+    volumes: [postgres18-data:/var/lib/postgresql]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U products -d products"]
       interval: 3s
@@ -42,12 +42,12 @@ services:
       retries: 40
 
   mongo:
-    image: mongo:7
+    image: mongo:8
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: root
     volumes:
-      - mongo-data:/data/db
+      - mongo8-data:/data/db
       - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/10-payments-user.js:ro
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
@@ -191,9 +191,9 @@ services:
       args: { APP_REPO: "https://github.com/ray-language/raylogs.git", APP_REF: "1002c71" }
 
 volumes:
-  postgres-data:
+  postgres18-data:
   mysql-data:
-  mongo-data:
+  mongo8-data:
   raykv-data:
   rayq-data:
   raywatch-data:
