@@ -38,10 +38,12 @@ pub fn decode(text: string) -> Result<Event, string> {
         Option.Some(d) => d,
         Option.None => json.Json.JNull,
     };
-    Result.Ok(Event {
-        kind: kind,
-        id: id,
-        traceparent: json.get_string(j, "traceparent").unwrap_or(""),
-        data: data,
-    })
+    Result.Ok(
+        Event {
+            kind: kind,
+            id: id,
+            traceparent: json.get_string(j, "traceparent").unwrap_or(""),
+            data: data
+        }
+    )
 }

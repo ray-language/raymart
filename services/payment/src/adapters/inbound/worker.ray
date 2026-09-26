@@ -65,16 +65,14 @@ pub fn work_forever<R: IntentRepository, C: CardProcessor, B: Bus>(
 ) {
     while (true) {
         match (queue.pull(q, JOBS_QUEUE)) {
-            Result.Ok(next) => match (next) {
-                Option.Some(m) => {
-                    if (handle_job(p, m.body)) {
-                        let _ = queue.ack(q, JOBS_QUEUE, m.id);
-                    } else {
-                        let _ = queue.nack(q, JOBS_QUEUE, m.id);
-                    }
-                },
-                Option.None => time.sleep(idle_ms),
+            Result.Ok(Option.Some(m)) => {
+                if (handle_job(p, m.body)) {
+                    let _ = queue.ack(q, JOBS_QUEUE, m.id);
+                } else {
+                    let _ = queue.nack(q, JOBS_QUEUE, m.id);
+                }
             },
+            Result.Ok(Option.None) => time.sleep(idle_ms),
             Result.Err(e) => {
                 logs.warn("payment", "", "rayq unavailable", [("error", e)]);
                 time.sleep(idle_ms * 4);

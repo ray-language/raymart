@@ -5,7 +5,7 @@ RAY_PROJECTS := libs/common $(wildcard services/*) $(wildcard libs/grpc) $(wildc
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down build ps logs test test-it check-release-it check-release cli e2e token chaos chaos-db trace log-stats bench bench-quick
+.PHONY: help up down build ps logs test test-it check-release-it check-release check-native cli e2e token chaos chaos-db trace log-stats bench bench-quick
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
@@ -40,6 +40,10 @@ check-release-it: ## Integration tests with the RELEASE toolchain, from a contai
 check-release: ## Build + test every raylang project with the RELEASE toolchain the images use
 	docker build -q -f docker/Dockerfile --target toolchain -t raymart-toolchain . >/dev/null
 	@set -e; for p in $(RAY_PROJECTS); do echo "== $$p"; docker run --rm -v "$$PWD":/src -w /src/$$p raymart-toolchain sh -c 'ray fetch >/dev/null && ray test </dev/null'; done
+
+check-native: ## Every unit suite on NATIVE binaries (ray test --native), with the RELEASE toolchain
+	docker build -q -f docker/Dockerfile --target toolchain -t raymart-toolchain . >/dev/null
+	@set -e; for p in $(RAY_PROJECTS); do echo "== $$p"; docker run --rm -v "$$PWD":/src -w /src/$$p raymart-toolchain sh -c 'ray fetch >/dev/null && ray test --native </dev/null'; done
 
 # The raymart CLI (tools/raymart) as a native binary inside the compose network, like every
 # other raymart program: no host toolchain needed.

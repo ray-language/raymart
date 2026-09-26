@@ -18,5 +18,10 @@ pub trait CardProcessor {
 /// The asynchronous side: charge jobs in, results out (both on rayq in production).
 pub trait Bus {
     fn enqueue_charge(self, intent_id: string, traceparent: string) -> Result<int, string>;
-    fn publish_result(self, kind: string, data: json.Json, traceparent: string) -> Result<int, string>;
+    fn publish_result(
+        self,
+        kind: string,
+        data: json.Json,
+        traceparent: string
+    ) -> Result<int, string>;
 }

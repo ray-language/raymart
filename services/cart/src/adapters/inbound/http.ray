@@ -19,7 +19,12 @@ fn reply(ctx: web.Ctx, res: web.Res, r: Result<Cart, string>) {
     match (r) {
         Result.Ok(c) => httpx.ok(res, json.stringify(to_json(c))),
         Result.Err(e) => {
-            logs.warn("cart", tracing.trace_id(web.header_of(ctx, "traceparent")), "request failed", [("path", ctx.path), ("error", e)]);
+            logs.warn(
+                "cart",
+                tracing.trace_id(web.header_of(ctx, "traceparent")),
+                "request failed",
+                [("path", ctx.path), ("error", e)]
+            );
             httpx.fail(res, e);
         },
     }
@@ -29,17 +34,6 @@ fn body_int(ctx: web.Ctx, key: string) -> Option<int> {
     match (web.json_body(ctx)) {
         Result.Ok(j) => json.get_int(j, key),
         Result.Err(_) => Option.None,
-    }
-}
-
-// Both values, or None (match has no tuple patterns).
-fn both(a: Option<int>, b: Option<int>) -> Option<(int, int)> {
-    match (a) {
-        Option.Some(x) => match (b) {
-            Option.Some(y) => Option.Some((x, y)),
-            Option.None => Option.None,
-        },
-        Option.None => Option.None,
     }
 }
 
@@ -65,15 +59,29 @@ pub fn build<S: CartStore, P: ProductCatalog>(carts: Carts<S, P>, jwt_secret: st
         reply(ctx, res, view(carts, web.local(ctx, "user")));
     });
     web.POST(app, "/api/cart/items", fn(ctx: web.Ctx, res: web.Res) {
-        match (both(body_int(ctx, "product_id"), body_int(ctx, "qty"))) {
-            Option.Some(pq) => reply(ctx, res, add_item(carts, web.local(ctx, "user"), pq.0, pq.1, web.header_of(ctx, "traceparent"))),
-            Option.None => httpx.error(res, 400, "invalid", "body must be {\"product_id\": int, \"qty\": int}"),
+        match ((body_int(ctx, "product_id"), body_int(ctx, "qty"))) {
+            (Option.Some(pid), Option.Some(qty)) => reply(
+                ctx,
+                res,
+                add_item(carts, web.local(ctx, "user"), pid, qty, web.header_of(ctx, "traceparent"))
+            ),
+            _ => httpx.error(res, 400, "invalid", "body must be {\"product_id\": int, \"qty\": int}"),
         }
     });
     web.PUT(app, "/api/cart/items/:product_id", fn(ctx: web.Ctx, res: web.Res) {
-        match (both(parse_int(web.param(ctx, "product_id")), body_int(ctx, "qty"))) {
-            Option.Some(pq) => reply(ctx, res, set_item_qty(carts, web.local(ctx, "user"), pq.0, pq.1, web.header_of(ctx, "traceparent"))),
-            Option.None => httpx.error(res, 400, "invalid", "path needs a product id and body {\"qty\": int}"),
+        match ((parse_int(web.param(ctx, "product_id")), body_int(ctx, "qty"))) {
+            (Option.Some(pid), Option.Some(qty)) => reply(
+                ctx,
+                res,
+                set_item_qty(
+                    carts,
+                    web.local(ctx, "user"),
+                    pid,
+                    qty,
+                    web.header_of(ctx, "traceparent")
+                )
+            ),
+            _ => httpx.error(res, 400, "invalid", "path needs a product id and body {\"qty\": int}"),
         }
     });
     web.DELETE(app, "/api/cart/items/:product_id", fn(ctx: web.Ctx, res: web.Res) {

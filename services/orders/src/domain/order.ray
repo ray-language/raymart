@@ -5,7 +5,9 @@
 import std/json;
 
 pub const PENDING: string = "pending_payment";
+
 pub const PAID: string = "paid";
+
 pub const CANCELLED: string = "cancelled";
 
 pub struct OrderItem {
@@ -48,12 +50,28 @@ pub struct OutboxEntry {
     payload: string,
 }
 
-pub fn new_order(id: string, user_id: string, items: [OrderItem], now_ms: int) -> Result<Order, string> {
+pub fn new_order(
+    id: string,
+    user_id: string,
+    items: [OrderItem],
+    now_ms: int
+) -> Result<Order, string> {
     if (items.len() == 0) {
         return Result.Err("invalid: an order needs at least one item");
     }
     let total = items.fold(0, fn(acc: int, it: OrderItem) -> int { acc + it.price_cents * it.qty });
-    Result.Ok(Order { id: id, user_id: user_id, status: PENDING, items: items, total_cents: total, created_ms: now_ms, payment_id: "", reason: "" })
+    Result.Ok(
+        Order {
+            id: id,
+            user_id: user_id,
+            status: PENDING,
+            items: items,
+            total_cents: total,
+            created_ms: now_ms,
+            payment_id: "",
+            reason: ""
+        }
+    )
 }
 
 /// The only moves an order can make.

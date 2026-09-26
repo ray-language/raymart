@@ -6,7 +6,9 @@
 import std/protobuf;
 
 pub const SERVICE: string = "/raymart.payment.v1.Payments";
+
 pub const CREATE_INTENT: string = "/raymart.payment.v1.Payments/CreateIntent";
+
 pub const GET_INTENT: string = "/raymart.payment.v1.Payments/GetIntent";
 
 pub struct CreateIntentRequest {
@@ -43,13 +45,15 @@ pub fn encode_create(r: CreateIntentRequest) -> bytes {
 
 pub fn decode_create(b: bytes) -> Result<CreateIntentRequest, string> {
     let f = protobuf.parse(b)?;
-    Result.Ok(CreateIntentRequest {
-        order_id: protobuf.get_string(f, 1),
-        amount_cents: protobuf.get_int(f, 2),
-        currency: protobuf.get_string(f, 3),
-        card_last4: protobuf.get_string(f, 4),
-        user_id: protobuf.get_string(f, 5),
-    })
+    Result.Ok(
+        CreateIntentRequest {
+            order_id: protobuf.get_string(f, 1),
+            amount_cents: protobuf.get_int(f, 2),
+            currency: protobuf.get_string(f, 3),
+            card_last4: protobuf.get_string(f, 4),
+            user_id: protobuf.get_string(f, 5)
+        }
+    )
 }
 
 pub fn encode_get(r: GetIntentRequest) -> bytes {
@@ -77,13 +81,15 @@ pub fn encode_intent(i: Intent) -> bytes {
 
 pub fn decode_intent(b: bytes) -> Result<Intent, string> {
     let f = protobuf.parse(b)?;
-    Result.Ok(Intent {
-        id: protobuf.get_string(f, 1),
-        order_id: protobuf.get_string(f, 2),
-        amount_cents: protobuf.get_int(f, 3),
-        currency: protobuf.get_string(f, 4),
-        status: protobuf.get_string(f, 5),
-        reason: protobuf.get_string(f, 6),
-        user_id: protobuf.get_string(f, 7),
-    })
+    Result.Ok(
+        Intent {
+            id: protobuf.get_string(f, 1),
+            order_id: protobuf.get_string(f, 2),
+            amount_cents: protobuf.get_int(f, 3),
+            currency: protobuf.get_string(f, 4),
+            status: protobuf.get_string(f, 5),
+            reason: protobuf.get_string(f, 6),
+            user_id: protobuf.get_string(f, 7)
+        }
+    )
 }

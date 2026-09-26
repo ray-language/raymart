@@ -127,23 +127,20 @@ pub fn summarize(r: Recorder, seconds: float) -> [Summary] {
         }
         let n = sorted.len();
         out.push(
-            Summary { step: step, ok: n, errors: errors, error_detail: detail.join(", "), rps: if (seconds > 0.0) {
-                n as float / seconds
-            } else {
-                0.0
-            }, error_pct: if (n + errors > 0) {
-                errors as float * 100.0 / (n + errors) as float
-            } else {
-                0.0
-            }, mean_ms: if (n > 0) {
-                total as float / n as float / 1000.0
-            } else {
-                0.0
-            }, p50_ms: percentile_ms(sorted, 50), p90_ms: percentile_ms(sorted, 90), p95_ms: percentile_ms(sorted, 95), p99_ms: percentile_ms(sorted, 99), max_ms: if (n > 0) {
-                sorted[n - 1] as float / 1000.0
-            } else {
-                0.0
-            } }
+            Summary {
+                step: step,
+                ok: n,
+                errors: errors,
+                error_detail: detail.join(", "),
+                rps: if (seconds > 0.0) { n as float / seconds } else { 0.0 },
+                error_pct: if (n + errors > 0) { errors as float * 100.0 / (n + errors) as float } else { 0.0 },
+                mean_ms: if (n > 0) { total as float / n as float / 1000.0 } else { 0.0 },
+                p50_ms: percentile_ms(sorted, 50),
+                p90_ms: percentile_ms(sorted, 90),
+                p95_ms: percentile_ms(sorted, 95),
+                p99_ms: percentile_ms(sorted, 99),
+                max_ms: if (n > 0) { sorted[n - 1] as float / 1000.0 } else { 0.0 }
+            }
         );
     }
     out

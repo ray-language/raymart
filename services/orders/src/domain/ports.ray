@@ -4,11 +4,23 @@ from domain/order import Order, OrderItem, CartLine, OutboxEntry;
 pub trait OrderRepository {
     /// Stores a new order and its outbox message in ONE transaction: either both exist or
     /// neither does, so a payment request is never lost nor sent for a phantom order.
-    fn create(self, order: Order, outbox_kind: string, outbox_payload: string) -> Result<int, string>;
+    fn create(
+        self,
+        order: Order,
+        outbox_kind: string,
+        outbox_payload: string
+    ) -> Result<int, string>;
     fn find(self, id: string) -> Result<Option<Order>, string>;
     fn list_for(self, user_id: string) -> Result<[Order], string>;
     /// Compare-and-set of the status: true when the order was in `from` and is now in `to`.
-    fn transition(self, id: string, from: string, to: string, payment_id: string, reason: string) -> Result<bool, string>;
+    fn transition(
+        self,
+        id: string,
+        from: string,
+        to: string,
+        payment_id: string,
+        reason: string
+    ) -> Result<bool, string>;
     fn pending_outbox(self, limit: int) -> Result<[OutboxEntry], string>;
     fn mark_sent(self, outbox_id: int) -> Result<int, string>;
 }
@@ -20,7 +32,12 @@ pub trait CartGateway {
 
 pub trait Inventory {
     /// All-or-nothing and idempotent per order; returns the lines with the catalog's prices.
-    fn reserve(self, order_id: string, lines: [CartLine], traceparent: string) -> Result<[OrderItem], string>;
+    fn reserve(
+        self,
+        order_id: string,
+        lines: [CartLine],
+        traceparent: string
+    ) -> Result<[OrderItem], string>;
     fn commit(self, order_id: string, traceparent: string) -> Result<int, string>;
     fn release(self, order_id: string, traceparent: string) -> Result<int, string>;
 }

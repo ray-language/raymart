@@ -6,6 +6,7 @@
 import std/json;
 import grpc/client;
 import common/paymentpb;
+import common/pool;
 import common/tracing;
 from domain/ports import Payments;
 
@@ -13,13 +14,7 @@ pub struct PaymentsGrpc {
     host: string,
     port: int,
     deadline_ms: int,
-    conns: Channel<GrpcSlot>,
-}
-
-/// A pool slot (common/pool.ray): an idle HTTP/2 connection, or one to dial.
-pub enum GrpcSlot {
-    Ready(client.Conn),
-    Empty,
+    conns: pool.Pool<client.Conn>,
 }
 
 pub fn new_payments_grpc(
@@ -28,44 +23,36 @@ pub fn new_payments_grpc(
     deadline_ms: int,
     pool_size: int
 ) -> PaymentsGrpc {
-    let n = if (pool_size < 1) { 1 } else { pool_size };
-    let slots: Channel<GrpcSlot> = Channel.bounded(n);
-    for _ in 0..n {
-        send(slots, GrpcSlot.Empty);
-    }
-    PaymentsGrpc { host: host, port: port, deadline_ms: deadline_ms, conns: slots }
-}
-
-fn checkout(p: PaymentsGrpc) -> Result<client.Conn, string> {
-    match (recv(p.conns)) {
-        Option.None => Result.Err("unavailable: payment: the pool is closed"),
-        Option.Some(slot) => match (slot) {
-            GrpcSlot.Ready(c) => Result.Ok(c),
-            GrpcSlot.Empty => match (client.connect(p.host, p.port)) {
-                Result.Ok(c) => Result.Ok(c),
-                Result.Err(e) => {
-                    send(p.conns, GrpcSlot.Empty);
-                    Result.Err("unavailable: payment: " + e)
-                },
-            },
-        },
+    PaymentsGrpc {
+        host: host,
+        port: port,
+        deadline_ms: deadline_ms,
+        conns: pool.new_pool(pool_size)
     }
 }
 
-/// One unary call on a pooled connection; the connection goes back unless it broke.
+/// One unary call on a pooled connection; the connection goes back unless the call failed or
+/// left it unusable (GOAWAY). The relay retries a failed delivery on its next pass, so there is
+/// no retry here.
 fn call_pooled(
     p: PaymentsGrpc,
     path: string,
     message: bytes,
     md: Map<string, string>
 ) -> Result<client.Reply, string> {
-    let c = checkout(p)?;
+    let lease = pool.checkout(p.conns, fn() -> Result<client.Conn, string> {
+        match (client.connect(p.host, p.port)) {
+            Result.Ok(c) => Result.Ok(c),
+            Result.Err(e) => Result.Err("unavailable: payment: " + e),
+        }
+    })?;
+    let c = lease.conn;
     let r = client.call(c, path, message, md, p.deadline_ms);
     if (r.is_ok() && client.usable(c)) {
-        send(p.conns, GrpcSlot.Ready(c));
+        pool.checkin(p.conns, c);
     } else {
         client.disconnect(c);
-        send(p.conns, GrpcSlot.Empty);
+        pool.discard(p.conns);
     }
     r
 }

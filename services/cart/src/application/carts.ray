@@ -15,14 +15,26 @@ pub fn view<S: CartStore, P: ProductCatalog>(c: Carts<S, P>, user: string) -> Re
     c.store.load(user)
 }
 
-pub fn add_item<S: CartStore, P: ProductCatalog>(c: Carts<S, P>, user: string, product_id: int, qty: int, tp: string) -> Result<Cart, string> {
+pub fn add_item<S: CartStore, P: ProductCatalog>(
+    c: Carts<S, P>,
+    user: string,
+    product_id: int,
+    qty: int,
+    tp: string
+) -> Result<Cart, string> {
     let product = c.catalog.product(product_id, tp)?;
     let next = add(c.store.load(user)?, product, qty)?;
     c.store.save(next)?;
     Result.Ok(next)
 }
 
-pub fn set_item_qty<S: CartStore, P: ProductCatalog>(c: Carts<S, P>, user: string, product_id: int, qty: int, tp: string) -> Result<Cart, string> {
+pub fn set_item_qty<S: CartStore, P: ProductCatalog>(
+    c: Carts<S, P>,
+    user: string,
+    product_id: int,
+    qty: int,
+    tp: string
+) -> Result<Cart, string> {
     let current = c.store.load(user)?;
     if (qty == 0) {
         let next = remove(current, product_id);
@@ -35,12 +47,19 @@ pub fn set_item_qty<S: CartStore, P: ProductCatalog>(c: Carts<S, P>, user: strin
     Result.Ok(next)
 }
 
-pub fn remove_item<S: CartStore, P: ProductCatalog>(c: Carts<S, P>, user: string, product_id: int) -> Result<Cart, string> {
+pub fn remove_item<S: CartStore, P: ProductCatalog>(
+    c: Carts<S, P>,
+    user: string,
+    product_id: int
+) -> Result<Cart, string> {
     let next = remove(c.store.load(user)?, product_id);
     c.store.save(next)?;
     Result.Ok(next)
 }
 
-pub fn clear_cart<S: CartStore, P: ProductCatalog>(c: Carts<S, P>, user: string) -> Result<int, string> {
+pub fn clear_cart<S: CartStore, P: ProductCatalog>(
+    c: Carts<S, P>,
+    user: string
+) -> Result<int, string> {
     c.store.clear(user)
 }

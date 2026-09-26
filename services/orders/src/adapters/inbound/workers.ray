@@ -109,18 +109,15 @@ pub fn consume_forever<R: OrderRepository, C: CartGateway, I: Inventory, P: Paym
     idle_ms: int
 ) {
     while (true) {
-        // (Nested match: the exhaustiveness check does not combine Ok(Some)/Ok(None) arms.)
         match (queue.pull(q, RESULTS_QUEUE)) {
-            Result.Ok(next) => match (next) {
-                Option.Some(m) => {
-                    if (handle_message(orders, m.body)) {
-                        let _ = queue.ack(q, RESULTS_QUEUE, m.id);
-                    } else {
-                        let _ = queue.nack(q, RESULTS_QUEUE, m.id);
-                    }
-                },
-                Option.None => time.sleep(idle_ms),
+            Result.Ok(Option.Some(m)) => {
+                if (handle_message(orders, m.body)) {
+                    let _ = queue.ack(q, RESULTS_QUEUE, m.id);
+                } else {
+                    let _ = queue.nack(q, RESULTS_QUEUE, m.id);
+                }
             },
+            Result.Ok(Option.None) => time.sleep(idle_ms),
             Result.Err(e) => {
                 logs.warn("orders", "", "rayq unavailable", [("error", e)]);
                 time.sleep(idle_ms * 4);

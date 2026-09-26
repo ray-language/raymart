@@ -24,6 +24,10 @@ pub fn user_of(authorization: string, secret: string) -> Result<string, string> 
 /// A signed HS256 token for `user`, valid for `ttl_s` seconds (development tooling, tests).
 pub fn token_for(user: string, secret: string, ttl_s: int) -> string {
     let now_s = time.now() / 1000;
-    let payload = json.render(json.obj().field("sub", user).field("iat", now_s).field("exp", now_s + ttl_s));
+    let payload = json.render(json
+        .obj()
+        .field("sub", user)
+        .field("iat", now_s)
+        .field("exp", now_s + ttl_s));
     jwt.jwt_sign(secret.to_bytes(), payload)
 }

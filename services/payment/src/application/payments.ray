@@ -6,7 +6,15 @@
 //                publish may have been lost before the job was acked), so the step is safe
 //                to repeat under at-least-once delivery.
 from domain/ports import IntentRepository, CardProcessor, Bus;
-from domain/intent import Intent, new_intent, is_final, result_kind, result_data, PROCESSING, SUCCEEDED, FAILED;
+from domain/intent import
+    Intent,
+    new_intent,
+    is_final,
+    result_kind,
+    result_data,
+    PROCESSING,
+    SUCCEEDED,
+    FAILED;
 
 pub struct Payments<R: IntentRepository, C: CardProcessor, B: Bus> {
     repo: R,
@@ -14,11 +22,25 @@ pub struct Payments<R: IntentRepository, C: CardProcessor, B: Bus> {
     bus: B,
 }
 
-pub fn new_payments<R: IntentRepository, C: CardProcessor, B: Bus>(repo: R, cards: C, bus: B) -> Payments<R, C, B> {
+pub fn new_payments<R: IntentRepository, C: CardProcessor, B: Bus>(
+    repo: R,
+    cards: C,
+    bus: B
+) -> Payments<R, C, B> {
     Payments { repo: repo, cards: cards, bus: bus }
 }
 
-pub fn create_intent<R: IntentRepository, C: CardProcessor, B: Bus>(p: Payments<R, C, B>, id: string, order_id: string, user_id: string, amount_cents: int, currency: string, card_last4: string, now_ms: int, tp: string) -> Result<Intent, string> {
+pub fn create_intent<R: IntentRepository, C: CardProcessor, B: Bus>(
+    p: Payments<R, C, B>,
+    id: string,
+    order_id: string,
+    user_id: string,
+    amount_cents: int,
+    currency: string,
+    card_last4: string,
+    now_ms: int,
+    tp: string
+) -> Result<Intent, string> {
     let fresh = new_intent(id, order_id, user_id, amount_cents, currency, card_last4, now_ms)?;
     let stored = p.repo.create_if_absent(fresh)?;
     if (stored.status == PROCESSING) {
@@ -28,14 +50,21 @@ pub fn create_intent<R: IntentRepository, C: CardProcessor, B: Bus>(p: Payments<
     Result.Ok(stored)
 }
 
-pub fn get_intent<R: IntentRepository, C: CardProcessor, B: Bus>(p: Payments<R, C, B>, id: string) -> Result<Intent, string> {
+pub fn get_intent<R: IntentRepository, C: CardProcessor, B: Bus>(
+    p: Payments<R, C, B>,
+    id: string
+) -> Result<Intent, string> {
     match (p.repo.find(id)?) {
         Option.Some(i) => Result.Ok(i),
         Option.None => Result.Err("not_found: no payment ${id}"),
     }
 }
 
-pub fn process_charge<R: IntentRepository, C: CardProcessor, B: Bus>(p: Payments<R, C, B>, intent_id: string, tp: string) -> Result<Intent, string> {
+pub fn process_charge<R: IntentRepository, C: CardProcessor, B: Bus>(
+    p: Payments<R, C, B>,
+    intent_id: string,
+    tp: string
+) -> Result<Intent, string> {
     let intent = get_intent(p, intent_id)?;
     if (is_final(intent)) {
         p.bus.publish_result(result_kind(intent), result_data(intent), tp)?;

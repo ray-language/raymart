@@ -31,11 +31,7 @@ fn main() -> int {
     }
     let secret = config.get("RAYMART_JWT_SECRET", DEFAULT_SECRET);
     if (av[0] == "bench") {
-        var rest: [string] = [];
-        for i in 1..av.len() {
-            rest.push(av[i]);
-        }
-        return bench.run(rest);
+        return bench.run(av.slice(1, av.len()));
     }
     if (av[0] == "bench-resources" && av.len() == 2) {
         return resources.run(av[1]);

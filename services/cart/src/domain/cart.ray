@@ -71,7 +71,9 @@ pub fn set_qty(c: Cart, p: ProductInfo, qty: int) -> Result<Cart, string> {
         if (it.product_id == p.id) {
             placed = true;
             if (qty > 0) {
-                items.push(Item { product_id: p.id, name: p.name, price_cents: p.price_cents, qty: qty });
+                items.push(
+                    Item { product_id: p.id, name: p.name, price_cents: p.price_cents, qty: qty }
+                );
             }
         } else {
             items.push(it);
@@ -84,7 +86,10 @@ pub fn set_qty(c: Cart, p: ProductInfo, qty: int) -> Result<Cart, string> {
 }
 
 pub fn remove(c: Cart, product_id: int) -> Cart {
-    Cart { user_id: c.user_id, items: c.items.filter(fn(it: Item) -> bool { it.product_id != product_id }) }
+    Cart {
+        user_id: c.user_id,
+        items: c.items.filter(fn(it: Item) -> bool { it.product_id != product_id })
+    }
 }
 
 pub fn to_json(c: Cart) -> json.Json {
@@ -111,12 +116,14 @@ pub fn from_json(j: json.Json) -> Result<Cart, string> {
     };
     var items: [Item] = [];
     for it in json.get_array(j, "items").unwrap_or([]) {
-        items.push(Item {
-            product_id: json.get_int(it, "product_id").unwrap_or(0),
-            name: json.get_string(it, "name").unwrap_or(""),
-            price_cents: json.get_int(it, "price_cents").unwrap_or(0),
-            qty: json.get_int(it, "qty").unwrap_or(0),
-        });
+        items.push(
+            Item {
+                product_id: json.get_int(it, "product_id").unwrap_or(0),
+                name: json.get_string(it, "name").unwrap_or(""),
+                price_cents: json.get_int(it, "price_cents").unwrap_or(0),
+                qty: json.get_int(it, "qty").unwrap_or(0)
+            }
+        );
     }
     Result.Ok(Cart { user_id: user, items: items })
 }
