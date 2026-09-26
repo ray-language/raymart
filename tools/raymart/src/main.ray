@@ -1,0 +1,55 @@
+// raymart — the operator's tool for the running system.
+//
+//   raymart token <user> [ttl_s]      a development JWT for <user> (RAYMART_JWT_SECRET)
+//   raymart e2e [gateway_url]         end-to-end scenarios through the gateway (default
+//                                     http://127.0.0.1:8088); exit 0 when every check passes
+//   raymart order <user> <product> <qty> <card_last4>   add to the cart and check out; prints
+//                                     the order id (for `make chaos`)
+//   raymart status <user> <order_id>  prints the order's status
+import common/auth;
+import common/config;
+import e2e;
+
+const DEFAULT_SECRET: string = "raymart-dev-secret-change-me";
+
+fn usage() -> int {
+    eprint(
+        "usage: raymart token <user> [ttl_s] | e2e [gateway_url] | order <user> <product> <qty> <card> | status <user> <order_id>"
+    );
+    64
+}
+
+fn main() -> int {
+    let av = args();
+    if (av.len() == 0) {
+        return usage();
+    }
+    let secret = config.get("RAYMART_JWT_SECRET", DEFAULT_SECRET);
+    if (av[0] == "token") {
+        if (av.len() < 2) {
+            return usage();
+        }
+        let ttl = if (av.len() > 2) { parse_int(av[2]).unwrap_or(3600) } else { 3600 };
+        print(auth.token_for(av[1], secret, ttl));
+        return 0;
+    }
+    let gateway = config.get("RAYMART_GATEWAY", "http://127.0.0.1:8088");
+    if (av[0] == "order" && av.len() == 5) {
+        return e2e.place_order(
+            gateway,
+            secret,
+            av[1],
+            parse_int(av[2]).unwrap_or(0),
+            parse_int(av[3]).unwrap_or(0),
+            av[4]
+        );
+    }
+    if (av[0] == "status" && av.len() == 3) {
+        return e2e.print_status(gateway, secret, av[1], av[2]);
+    }
+    if (av[0] == "e2e") {
+        let base = if (av.len() > 1) { av[1] } else { "http://127.0.0.1:8088" };
+        return e2e.run(base, secret);
+    }
+    usage()
+}

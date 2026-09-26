@@ -1,0 +1,218 @@
+// End-to-end scenarios against the running system, through the gateway only (what a client
+// sees). Each scenario uses fresh users, so runs do not interfere with each other.
+import net/http;
+import std/json;
+import std/time;
+import std/crypto;
+import std/hex;
+import common/auth;
+
+struct Ctx {
+    base: string,
+    secret: string,
+    failures: [string],
+}
+
+struct Resp {
+    status: int,
+    body: json.Json,
+    text: string,
+}
+
+fn check(c: Ctx, ok: bool, what: string) {
+    if (ok) {
+        print("✓ " + what);
+    } else {
+        print("✗ " + what);
+        c.failures.push(what);
+    }
+}
+
+fn fresh_user(tag: string) -> string {
+    "e2e-" + tag + "-" + hex.hex_encode(crypto.random_bytes(4))
+}
+
+fn req(c: Ctx, method: string, path: string, body: string, user: string) -> Resp {
+    let h: Map<string, string> = Map.new();
+    h.insert("content-type", "application/json");
+    if (user.len() > 0) {
+        h.insert("authorization", "Bearer " + auth.token_for(user, c.secret, 600));
+    }
+    match (http.request_with(method, c.base + path, body, h)) {
+        Result.Ok(r) => {
+            let text = http.body_text(r).unwrap_or("");
+            Resp { status: r.status, body: json.parse(text).unwrap_or(json.Json.JNull), text: text }
+        },
+        Result.Err(e) => Resp { status: 0, body: json.Json.JNull, text: e },
+    }
+}
+
+fn stock(c: Ctx, product_id: int) -> int {
+    json.get_int(req(c, "GET", "/api/products/${product_id}", "", "").body, "stock").unwrap_or(-1)
+}
+
+/// Polls the order until it leaves pending_payment (or `timeout_ms` passes).
+fn settle(c: Ctx, user: string, order_id: string, timeout_ms: int) -> json.Json {
+    let until = time.now() + timeout_ms;
+    var last = json.Json.JNull;
+    while (time.now() < until) {
+        last = req(c, "GET", "/api/orders/" + order_id, "", user).body;
+        let status = json.get_string(last, "status").unwrap_or("");
+        if (status != "pending_payment" && status != "") {
+            return last;
+        }
+        time.sleep(300);
+    }
+    last
+}
+
+fn scenario_edge(c: Ctx) {
+    check(c, req(c, "GET", "/health", "", "").status == 200, "the gateway is healthy");
+    let catalog = req(c, "GET", "/api/products", "", "");
+    check(
+        c,
+        catalog.status == 200 && json.as_array(catalog.body).unwrap_or([]).len() >= 6,
+        "the catalog is public and seeded"
+    );
+    check(
+        c,
+        req(c, "GET", "/api/cart", "", "").status == 401,
+        "the cart needs a token (401 at the gateway)"
+    );
+    check(
+        c,
+        req(c, "GET", "/api/products/999999", "", "").status == 404,
+        "a missing product is 404"
+    );
+}
+
+fn scenario_paid(c: Ctx) {
+    let user = fresh_user("paid");
+    let before = stock(c, 5);
+    let add = req(c, "POST", "/api/cart/items", `{"product_id":5,"qty":2}`, user);
+    check(
+        c,
+        add.status == 200 && json.get_int(add.body, "total_cents").unwrap_or(0) == 1980,
+        "adding to the cart prices from the catalog"
+    );
+    let placed = req(c, "POST", "/api/orders", `{"card_last4":"4242"}`, user);
+    check(
+        c,
+        placed.status == 202
+            && json.get_string(placed.body, "status").unwrap_or("") == "pending_payment",
+        "checkout answers 202 pending_payment"
+    );
+    let id = json.get_string(placed.body, "id").unwrap_or("");
+    check(c, stock(c, 5) == before - 2, "checkout reserved the stock");
+    check(
+        c,
+        json
+            .get_array(req(c, "GET", "/api/cart", "", user).body, "items")
+            .unwrap_or([json.Json.JNull])
+            .len() == 0,
+        "checkout emptied the cart"
+    );
+    let done = settle(c, user, id, 20000);
+    check(
+        c,
+        json.get_string(done, "status").unwrap_or("") == "paid",
+        "the order is paid asynchronously (outbox → gRPC → rayq)"
+    );
+    let pay = json.get_string(done, "payment_id").unwrap_or("");
+    let payment = req(c, "GET", "/api/payments/" + pay, "", user);
+    check(
+        c,
+        payment.status == 200
+            && json.get_string(payment.body, "status").unwrap_or("") == "succeeded",
+        "the payment is visible to its owner"
+    );
+    check(
+        c,
+        req(c, "GET", "/api/payments/" + pay, "", fresh_user("other")).status == 404,
+        "another user cannot see it"
+    );
+    check(
+        c,
+        req(c, "GET", "/api/orders/" + id, "", fresh_user("other")).status == 404,
+        "nor the order"
+    );
+    check(c, stock(c, 5) == before - 2, "a paid order keeps its stock");
+}
+
+fn scenario_declined(c: Ctx) {
+    let user = fresh_user("declined");
+    let before = stock(c, 6);
+    let _ = req(c, "POST", "/api/cart/items", `{"product_id":6,"qty":1}`, user);
+    let placed = req(c, "POST", "/api/orders", `{"card_last4":"0002"}`, user);
+    let id = json.get_string(placed.body, "id").unwrap_or("");
+    check(c, placed.status == 202, "a checkout with a card to be declined is accepted");
+    let done = settle(c, user, id, 20000);
+    check(
+        c,
+        json.get_string(done, "status").unwrap_or("") == "cancelled"
+            && json.get_string(done, "reason").unwrap_or("") == "card declined",
+        "a declined payment cancels the order"
+    );
+    check(c, stock(c, 6) == before, "a cancelled order gives its stock back (compensation)");
+}
+
+fn scenario_refusals(c: Ctx) {
+    let user = fresh_user("refused");
+    let big = req(c, "POST", "/api/cart/items", `{"product_id":4,"qty":99}`, user);
+    check(c, big.status == 409, "more than the stock is refused (409 out_of_stock)");
+    let empty = req(c, "POST", "/api/orders", `{"card_last4":"4242"}`, user);
+    check(c, empty.status == 400, "an empty cart cannot be checked out (400)");
+    let _ = req(c, "POST", "/api/cart/items", `{"product_id":5,"qty":1}`, user);
+    check(
+        c,
+        req(c, "POST", "/api/orders", `{"card_last4":"42"}`, user).status == 400,
+        "a malformed card is refused (400)"
+    );
+}
+
+pub fn run(base: string, secret: string) -> int {
+    let c = Ctx { base: base, secret: secret, failures: [] };
+    print("raymart e2e against ${base}");
+    scenario_edge(c);
+    scenario_paid(c);
+    scenario_declined(c);
+    scenario_refusals(c);
+    if (c.failures.len() == 0) {
+        print("\ne2e: all checks passed");
+        return 0;
+    }
+    print("\ne2e: ${c.failures.len()} check(s) failed");
+    1
+}
+
+/// `raymart order`: adds to the cart and checks out; prints the order id.
+pub fn place_order(
+    base: string,
+    secret: string,
+    user: string,
+    product_id: int,
+    qty: int,
+    card: string
+) -> int {
+    let c = Ctx { base: base, secret: secret, failures: [] };
+    let _ = req(c, "POST", "/api/cart/items", `{"product_id":${product_id},"qty":${qty}}`, user);
+    let placed = req(c, "POST", "/api/orders", `{"card_last4":"${card}"}`, user);
+    if (placed.status != 202) {
+        eprint("checkout failed (${placed.status}): " + placed.text);
+        return 1;
+    }
+    print(json.get_string(placed.body, "id").unwrap_or(""));
+    0
+}
+
+/// `raymart status`: prints the order's status.
+pub fn print_status(base: string, secret: string, user: string, order_id: string) -> int {
+    let c = Ctx { base: base, secret: secret, failures: [] };
+    let r = req(c, "GET", "/api/orders/" + order_id, "", user);
+    if (r.status != 200) {
+        eprint("no such order (${r.status})");
+        return 1;
+    }
+    print(json.get_string(r.body, "status").unwrap_or(""));
+    0
+}

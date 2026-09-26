@@ -1,0 +1,42 @@
+# raygate in front of raymart. Prefixes are kept (strip_prefix = false): each service serves
+# its own /api/<name> paths. Routes that carry a user's data require a Bearer JWT; the secret
+# must match the services' JWT_SECRET (docker-compose.yml).
+
+[server]
+bind = "0.0.0.0"
+port = 8080
+drain_ms = 3000
+metrics_path = "/metrics"
+health_path = "/health"
+
+[[route]]
+name = "products"
+prefix = "/api/products"
+upstream = "http://products:8080"
+timeout_ms = 3000
+retries = 2
+rate_limit = 100
+
+[[route]]
+name = "cart"
+prefix = "/api/cart"
+upstream = "http://cart:8080"
+timeout_ms = 3000
+jwt_secret = "raymart-dev-secret-change-me"
+rate_limit = 50
+
+[[route]]
+name = "orders"
+prefix = "/api/orders"
+upstream = "http://orders:8080"
+timeout_ms = 5000
+jwt_secret = "raymart-dev-secret-change-me"
+rate_limit = 20
+
+[[route]]
+name = "payments"
+prefix = "/api/payments"
+upstream = "http://payment:8080"
+timeout_ms = 3000
+jwt_secret = "raymart-dev-secret-change-me"
+rate_limit = 50
