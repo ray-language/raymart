@@ -4,7 +4,7 @@ COMPOSE := docker compose
 RAY_PROJECTS := libs/common $(wildcard services/*) $(wildcard libs/grpc) $(wildcard tools/*)
 
 .DEFAULT_GOAL := help
-.PHONY: help up down build ps logs test test-it
+.PHONY: help up down build ps logs test test-it check-release
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
@@ -30,3 +30,7 @@ test: ## Unit tests of every raylang project (no containers needed)
 test-it: ## Adapter integration tests against the stores in Docker (published on 127.0.0.1 high ports)
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.test.yml up -d --wait postgres mysql mongo raykv rayq
 	@set -e; for p in $(wildcard services/*); do echo "== $$p"; (cd $$p && RAYMART_IT=1 ray test </dev/null); done
+
+check-release: ## Build + test every raylang project with the RELEASE toolchain the images use
+	docker build -q -f docker/Dockerfile --target toolchain -t raymart-toolchain . >/dev/null
+	@set -e; for p in $(RAY_PROJECTS); do echo "== $$p"; docker run --rm -v "$$PWD":/src -w /src/$$p raymart-toolchain sh -c 'ray fetch >/dev/null && ray test </dev/null'; done

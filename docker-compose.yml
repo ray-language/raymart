@@ -27,12 +27,15 @@ services:
 
   mysql:
     image: mysql:8.4
+    command: ["--mysql-native-password=ON"]
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: orders
       MYSQL_USER: orders
       MYSQL_PASSWORD: orders
-    volumes: [mysql-data:/var/lib/mysql]
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./docker/mysql-init.sql:/docker-entrypoint-initdb.d/10-native-password.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uorders -porders --silent"]
       interval: 3s
@@ -40,7 +43,12 @@ services:
 
   mongo:
     image: mongo:7
-    volumes: [mongo-data:/data/db]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+    volumes:
+      - mongo-data:/data/db
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/10-payments-user.js:ro
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
       interval: 3s
@@ -98,6 +106,57 @@ services:
       test: ["CMD", "/usr/local/bin/app", "health"]
       interval: 3s
       retries: 20
+
+  orders:
+    build:
+      <<: *raylang-build
+      args: { APP_DIR: services/orders }
+    environment:
+      <<: *jwt
+      MYSQL_HOST: mysql
+      MYSQL_USER: orders
+      MYSQL_PASSWORD: orders
+      MYSQL_DATABASE: orders
+      CART_HOST: cart
+      CART_RPC_PORT: "9000"
+      PRODUCTS_HOST: products
+      PRODUCTS_RPC_PORT: "9000"
+      PAYMENT_HOST: payment
+      PAYMENT_GRPC_PORT: "9100"
+      RAYQ_HOST: rayq
+      RAYQ_PORT: "7450"
+      HTTP_PORT: "8080"
+    depends_on:
+      mysql: { condition: service_healthy }
+      rayq: { condition: service_started }
+      cart: { condition: service_healthy }
+      products: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/app", "health"]
+      interval: 3s
+      retries: 30
+
+  payment:
+    build:
+      <<: *raylang-build
+      args: { APP_DIR: services/payment }
+    environment:
+      <<: *jwt
+      MONGO_HOST: mongo
+      MONGO_USER: payments
+      MONGO_PASSWORD: payments
+      MONGO_DATABASE: payments
+      RAYQ_HOST: rayq
+      RAYQ_PORT: "7450"
+      HTTP_PORT: "8080"
+      GRPC_PORT: "9100"
+    depends_on:
+      mongo: { condition: service_healthy }
+      rayq: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/app", "health"]
+      interval: 3s
+      retries: 30
 
 volumes:
   postgres-data:

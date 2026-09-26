@@ -1,0 +1,62 @@
+// The charge worker (a driving adapter): pulls `payment.jobs` from rayq and runs
+// process_charge; ack on success, nack on failure (rayq retries with backoff, then
+// dead-letters after its max attempts).
+import rpc/rpc;
+import std/json;
+import std/time;
+import common/queue;
+import common/events;
+import common/logs;
+import common/tracing;
+from domain/ports import IntentRepository, CardProcessor, Bus;
+from application/payments import Payments, process_charge;
+
+pub const JOBS_QUEUE: string = "payment.jobs";
+
+/// Handles one job; returns whether to ack it.
+pub fn handle_job<R: IntentRepository, C: CardProcessor, B: Bus>(p: Payments<R, C, B>, body: string) -> bool {
+    let e = match (events.decode(body)) {
+        Result.Ok(e) => e,
+        Result.Err(err) => {
+            logs.error("payment", "", "unreadable job, dropped", [("error", err)]);
+            return true;
+        },
+    };
+    let tid = tracing.trace_id(e.traceparent);
+    let intent_id = json.get_string(e.data, "intent_id").unwrap_or("");
+    match (process_charge(p, intent_id, e.traceparent)) {
+        Result.Ok(i) => {
+            logs.info("payment", tid, "charge processed", [("intent_id", i.id), ("order_id", i.order_id), ("status", i.status)]);
+            true
+        },
+        Result.Err(err) => {
+            if (err.starts_with("not_found")) {
+                logs.error("payment", tid, "job for an unknown intent, dropped", [("intent_id", intent_id)]);
+                return true;
+            }
+            logs.warn("payment", tid, "charge failed, will retry", [("intent_id", intent_id), ("error", err)]);
+            false
+        },
+    }
+}
+
+pub fn work_forever<R: IntentRepository, C: CardProcessor, B: Bus>(p: Payments<R, C, B>, q: rpc.Pool, idle_ms: int) {
+    while (true) {
+        match (queue.pull(q, JOBS_QUEUE)) {
+            Result.Ok(next) => match (next) {
+                Option.Some(m) => {
+                    if (handle_job(p, m.body)) {
+                        let _ = queue.ack(q, JOBS_QUEUE, m.id);
+                    } else {
+                        let _ = queue.nack(q, JOBS_QUEUE, m.id);
+                    }
+                },
+                Option.None => time.sleep(idle_ms),
+            },
+            Result.Err(e) => {
+                logs.warn("payment", "", "rayq unavailable", [("error", e)]);
+                time.sleep(idle_ms * 4);
+            },
+        }
+    }
+}

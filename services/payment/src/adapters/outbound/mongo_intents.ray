@@ -1,0 +1,168 @@
+// IntentRepository on MongoDB (collection `intents`, one document per intent, `_id` = the
+// intent id). One connection per operation. `create_if_absent` relies on a UNIQUE index on
+// order_id, so two concurrent requests for the same order cannot create two intents.
+import mongodb/mongo;
+import mongodb/bson;
+import std/crypto;
+import std/hex;
+import std/time;
+from domain/ports import IntentRepository;
+from domain/intent import Intent;
+
+pub struct MongoIntents {
+    host: string,
+    port: int,
+    user: string,
+    password: string,
+    database: string,
+}
+
+const COLL: string = "intents";
+
+fn open(r: MongoIntents) -> Result<mongo.Conn, string> {
+    match (mongo.connect(r.host, r.port, r.user, r.password, r.database, hex.hex_encode(crypto.random_bytes(18)))) {
+        Result.Ok(c) => Result.Ok(c),
+        Result.Err(e) => Result.Err("unavailable: payments database: " + e),
+    }
+}
+
+fn s(v: string) -> bson.Bson {
+    bson.Bson.Str(v)
+}
+
+fn str_of(doc: [bson.Field], name: string) -> string {
+    match (bson.get(doc, name)) {
+        Option.Some(v) => match (v) {
+            bson.Bson.Str(x) => x,
+            _ => "",
+        },
+        Option.None => "",
+    }
+}
+
+fn int_of(doc: [bson.Field], name: string) -> int {
+    match (bson.get(doc, name)) {
+        Option.Some(v) => match (v) {
+            bson.Bson.Int(x) => x,
+            bson.Bson.Double(f) => f as int,
+            _ => 0,
+        },
+        Option.None => 0,
+    }
+}
+
+fn to_doc(i: Intent) -> [bson.Field] {
+    [
+        bson.field("_id", s(i.id)),
+        bson.field("order_id", s(i.order_id)),
+        bson.field("user_id", s(i.user_id)),
+        bson.field("amount_cents", bson.Bson.Int(i.amount_cents)),
+        bson.field("currency", s(i.currency)),
+        bson.field("card_last4", s(i.card_last4)),
+        bson.field("status", s(i.status)),
+        bson.field("reason", s(i.reason)),
+        bson.field("created_ms", bson.Bson.Int(i.created_ms)),
+    ]
+}
+
+fn from_doc(d: [bson.Field]) -> Intent {
+    Intent {
+        id: str_of(d, "_id"),
+        order_id: str_of(d, "order_id"),
+        user_id: str_of(d, "user_id"),
+        amount_cents: int_of(d, "amount_cents"),
+        currency: str_of(d, "currency"),
+        card_last4: str_of(d, "card_last4"),
+        status: str_of(d, "status"),
+        reason: str_of(d, "reason"),
+        created_ms: int_of(d, "created_ms"),
+    }
+}
+
+/// Creates the unique index on order_id, retrying while MongoDB starts (up to `attempts` s).
+pub fn migrate(r: MongoIntents, attempts: int) -> Result<int, string> {
+    var last = "";
+    for _ in 0..attempts {
+        match (open(r)) {
+            Result.Ok(c) => {
+                let cmd = [
+                    bson.field("createIndexes", s(COLL)),
+                    bson.field("indexes", bson.Bson.Arr([bson.Bson.Doc([
+                        bson.field("key", bson.Bson.Doc([bson.field("order_id", bson.Bson.Int(1))])),
+                        bson.field("name", s("order_id_unique")),
+                        bson.field("unique", bson.Bson.Bool(true)),
+                    ])])),
+                    bson.field("$db", s(r.database)),
+                ];
+                let res = mongo.run_command(c, cmd);
+                mongo.disconnect(c);
+                // run_command returns server errors as a reply document: check `ok`.
+                let reply = res?;
+                return match (bson.get(reply, "ok")) {
+                    Option.Some(v) => match (v) {
+                        bson.Bson.Double(f) => if (f == 1.0) { Result.Ok(0) } else { Result.Err("createIndexes failed: " + bson.dump_doc(reply)) },
+                        bson.Bson.Int(n) => if (n == 1) { Result.Ok(0) } else { Result.Err("createIndexes failed: " + bson.dump_doc(reply)) },
+                        _ => Result.Err("createIndexes failed: " + bson.dump_doc(reply)),
+                    },
+                    Option.None => Result.Err("createIndexes failed: " + bson.dump_doc(reply)),
+                };
+            },
+            Result.Err(e) => {
+                last = e;
+                time.sleep(1000);
+            },
+        }
+    }
+    Result.Err(last)
+}
+
+fn find_one(c: mongo.Conn, filter: [bson.Field]) -> Result<Option<Intent>, string> {
+    let docs = mongo.find(c, COLL, filter)?;
+    if (docs.len() == 0) {
+        return Result.Ok(Option.None);
+    }
+    Result.Ok(Option.Some(from_doc(docs[0])))
+}
+
+// Lost a race on the unique index: the intent that was stored first is the order's intent.
+fn winner(c: mongo.Conn, order_id: string) -> Result<Intent, string> {
+    match (find_one(c, [bson.field("order_id", s(order_id))])?) {
+        Option.Some(i) => Result.Ok(i),
+        Option.None => Result.Err("unavailable: could not store the intent"),
+    }
+}
+
+impl IntentRepository for MongoIntents {
+    fn create_if_absent(self, intent: Intent) -> Result<Intent, string> {
+        let c = open(self)?;
+        let existing = find_one(c, [bson.field("order_id", s(intent.order_id))]);
+        let r: Result<Intent, string> = match (existing) {
+            Result.Ok(found) => match (found) {
+                Option.Some(i) => Result.Ok(i),
+                // insert answers Ok(0) — not Err — when the unique index refuses the document
+                // (MongoDB reports it as a writeError inside an ok:1 reply): 1 means we won.
+                Option.None => match (mongo.insert(c, COLL, [to_doc(intent)])) {
+                    Result.Ok(n) => if (n == 1) { Result.Ok(intent) } else { winner(c, intent.order_id) },
+                    Result.Err(_) => winner(c, intent.order_id),
+                },
+            },
+            Result.Err(e) => Result.Err(e),
+        };
+        mongo.disconnect(c);
+        r
+    }
+
+    fn find(self, id: string) -> Result<Option<Intent>, string> {
+        let c = open(self)?;
+        let r = find_one(c, [bson.field("_id", s(id))]);
+        mongo.disconnect(c);
+        r
+    }
+
+    fn finish(self, id: string, from: string, to: string, reason: string) -> Result<bool, string> {
+        let c = open(self)?;
+        let r = mongo.update(c, COLL, [bson.field("_id", s(id)), bson.field("status", s(from))], [bson.field("$set", bson.Bson.Doc([bson.field("status", s(to)), bson.field("reason", s(reason))]))], false);
+        mongo.disconnect(c);
+        Result.Ok(r? == 1)
+    }
+}

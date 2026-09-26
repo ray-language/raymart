@@ -1,0 +1,70 @@
+// In-memory adapters for the tests.
+import std/json;
+from domain/ports import IntentRepository, Bus;
+from domain/intent import Intent;
+
+pub struct MemoryIntents {
+    intents: Map<string, Intent>,
+}
+
+pub fn new_memory_intents() -> MemoryIntents {
+    let m: Map<string, Intent> = Map.new();
+    MemoryIntents { intents: m }
+}
+
+impl IntentRepository for MemoryIntents {
+    fn create_if_absent(self, intent: Intent) -> Result<Intent, string> {
+        for i in self.intents.values() {
+            if (i.order_id == intent.order_id) {
+                return Result.Ok(i);
+            }
+        }
+        self.intents.insert(intent.id, intent);
+        Result.Ok(intent)
+    }
+
+    fn find(self, id: string) -> Result<Option<Intent>, string> {
+        Result.Ok(self.intents.get(id))
+    }
+
+    fn finish(self, id: string, from: string, to: string, reason: string) -> Result<bool, string> {
+        match (self.intents.get(id)) {
+            Option.Some(i) => {
+                if (i.status != from) {
+                    return Result.Ok(false);
+                }
+                self.intents.insert(id, Intent { id: i.id, order_id: i.order_id, user_id: i.user_id, amount_cents: i.amount_cents, currency: i.currency, card_last4: i.card_last4, status: to, reason: reason, created_ms: i.created_ms });
+                Result.Ok(true)
+            },
+            Option.None => Result.Ok(false),
+        }
+    }
+}
+
+pub struct MemoryBus {
+    jobs: [string],
+    results: [string],
+    down: [bool],
+}
+
+pub fn new_memory_bus() -> MemoryBus {
+    MemoryBus { jobs: [], results: [], down: [false] }
+}
+
+impl Bus for MemoryBus {
+    fn enqueue_charge(self, intent_id: string, traceparent: string) -> Result<int, string> {
+        if (self.down[0]) {
+            return Result.Err("unavailable: rayq: down");
+        }
+        self.jobs.push(intent_id);
+        Result.Ok(1)
+    }
+
+    fn publish_result(self, kind: string, data: json.Json, traceparent: string) -> Result<int, string> {
+        if (self.down[0]) {
+            return Result.Err("unavailable: rayq: down");
+        }
+        self.results.push(kind + " " + json.get_string(data, "order_id").unwrap_or(""));
+        Result.Ok(1)
+    }
+}

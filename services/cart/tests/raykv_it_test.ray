@@ -31,7 +31,7 @@ fn raykv_saves_loads_and_clears_a_cart() {
         Result.Err(e) => panic(e),
     }
     assert_eq(s.clear(u).unwrap_or(-1), 1);
-    assert_eq(s.load(u).map(fn(c: Cart) -> int { c.items.len() }).unwrap_or(-1), 0);
+    assert_eq(match (s.load(u)) { Result.Ok(c) => c.items.len(), Result.Err(_) => -1 }, 0);
 }
 
 @test
@@ -43,5 +43,5 @@ fn raykv_carts_expire() {
     let u = user();
     let _ = s.save(Cart { user_id: u, items: [Item { product_id: 5, name: "Cable", price_cents: 990, qty: 1 }] });
     time.sleep(2100);
-    assert_eq(s.load(u).map(fn(c: Cart) -> int { c.items.len() }).unwrap_or(-1), 0);
+    assert_eq(match (s.load(u)) { Result.Ok(c) => c.items.len(), Result.Err(_) => -1 }, 0);
 }

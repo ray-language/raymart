@@ -1,0 +1,37 @@
+// The Bus port on rayq: charge jobs on `payment.jobs`, results on `payment.results`, each as
+// an event envelope (common/events) carrying the trace.
+import rpc/rpc;
+import std/json;
+import common/queue;
+import common/events;
+from domain/ports import Bus;
+
+pub const JOBS_QUEUE: string = "payment.jobs";
+pub const RESULTS_QUEUE: string = "payment.results";
+
+pub struct RayqBus {
+    pool: rpc.Pool,
+}
+
+pub fn new_rayq_bus(host: string, port: int) -> RayqBus {
+    RayqBus { pool: rpc.pool(host, port, 4) }
+}
+
+fn push(b: RayqBus, q: string, kind: string, data: json.Json, tp: string) -> Result<int, string> {
+    match (queue.push(b.pool, q, events.encode(events.new_event(kind, tp, data)))) {
+        Result.Ok(_) => Result.Ok(1),
+        Result.Err(e) => Result.Err("unavailable: rayq: " + e),
+    }
+}
+
+impl Bus for RayqBus {
+    fn enqueue_charge(self, intent_id: string, traceparent: string) -> Result<int, string> {
+        let m: Map<string, json.Json> = Map.new();
+        m.insert("intent_id", json.Json.JStr(intent_id));
+        push(self, JOBS_QUEUE, "payment.charge", json.Json.JObject(m), traceparent)
+    }
+
+    fn publish_result(self, kind: string, data: json.Json, traceparent: string) -> Result<int, string> {
+        push(self, RESULTS_QUEUE, kind, data, traceparent)
+    }
+}

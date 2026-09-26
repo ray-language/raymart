@@ -1,0 +1,49 @@
+// Payments over the payment service's gRPC API (proto/payment.proto, CreateIntent), on the
+// raymart gRPC client (h2c). This adapter owns the mapping between the order's payment
+// request and the protobuf contract, and between gRPC status codes and the domain's errors.
+// A connection per call: the outbox relay calls it a few times per second at most.
+import std/json;
+import grpc/client;
+import common/paymentpb;
+import common/tracing;
+from domain/ports import Payments;
+
+pub struct PaymentsGrpc {
+    host: string,
+    port: int,
+    deadline_ms: int,
+}
+
+fn status_error(r: client.Reply) -> string {
+    // 3 INVALID_ARGUMENT, 9 FAILED_PRECONDITION: the request itself is wrong.
+    if (r.status == 3 || r.status == 9) {
+        return "invalid: payment: " + r.status_message;
+    }
+    if (r.status == 5) {
+        return "not_found: payment: " + r.status_message;
+    }
+    "unavailable: payment (grpc-status ${r.status}): " + r.status_message
+}
+
+impl Payments for PaymentsGrpc {
+    fn create_intent(self, request_json: string, traceparent: string) -> Result<string, string> {
+        let j = json.parse(request_json)?;
+        let req = paymentpb.CreateIntentRequest {
+            order_id: json.get_string(j, "order_id").unwrap_or(""),
+            amount_cents: json.get_int(j, "amount_cents").unwrap_or(0),
+            currency: json.get_string(j, "currency").unwrap_or("USD"),
+            card_last4: json.get_string(j, "card_last4").unwrap_or(""),
+            user_id: json.get_string(j, "user_id").unwrap_or(""),
+        };
+        let md: Map<string, string> = Map.new();
+        md.insert("traceparent", tracing.child_of(traceparent));
+        let reply = match (client.call_once(self.host, self.port, paymentpb.CREATE_INTENT, paymentpb.encode_create(req), md, self.deadline_ms)) {
+            Result.Ok(r) => r,
+            Result.Err(e) => return Result.Err("unavailable: payment: " + e),
+        };
+        if (reply.status != 0) {
+            return Result.Err(status_error(reply));
+        }
+        Result.Ok(paymentpb.decode_intent(reply.message)?.id)
+    }
+}

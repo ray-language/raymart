@@ -1,0 +1,67 @@
+// The orders HTTP face, behind raygate. Every route needs a Bearer JWT; `sub` is the user.
+//   POST /api/orders       {card_last4}   checkout the cart → 202 + the order (pending_payment)
+//   GET  /api/orders                      the user's orders
+//   GET  /api/orders/:id                  one of the user's orders
+//   GET  /health
+import web/framework as web;
+import std/json;
+import std/time;
+import std/uuid;
+import common/auth;
+import common/httpx;
+import common/logs;
+import common/tracing;
+from domain/ports import OrderRepository, CartGateway, Inventory, Payments;
+from domain/order import Order, to_json;
+from application/orders import Orders, checkout, get_order, list_orders;
+
+fn fail(ctx: web.Ctx, res: web.Res, e: string) {
+    logs.warn("orders", tracing.trace_id(web.header_of(ctx, "traceparent")), "request failed", [("path", ctx.path), ("error", e)]);
+    httpx.fail(res, e);
+}
+
+pub fn build<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(orders: Orders<R, C, I, P>, jwt_secret: string) -> web.App {
+    let app = web.new_app();
+    web.GET(app, "/health", fn(ctx: web.Ctx, res: web.Res) {
+        httpx.ok(res, `{"status":"ok","service":"orders"}`);
+    });
+    web.use_on(app, "/api/orders", fn(ctx: web.Ctx, res: web.Res) -> web.Step {
+        match (auth.user_of(web.header_of(ctx, "authorization"), jwt_secret)) {
+            Result.Ok(user) => {
+                web.put_local(ctx, "user", user);
+                web.Step.Next
+            },
+            Result.Err(e) => {
+                httpx.error(res, 401, "unauthorized", e);
+                web.Step.Done
+            },
+        }
+    });
+    web.POST(app, "/api/orders", fn(ctx: web.Ctx, res: web.Res) {
+        let card = match (web.json_body(ctx)) {
+            Result.Ok(j) => json.get_string(j, "card_last4").unwrap_or(""),
+            Result.Err(_) => "",
+        };
+        let tp = web.header_of(ctx, "traceparent");
+        match (checkout(orders, web.local(ctx, "user"), card, uuid.uuid_v7(), time.now(), tp)) {
+            Result.Ok(o) => {
+                logs.info("orders", tracing.trace_id(tp), "order placed", [("order_id", o.id), ("total_cents", to_string(o.total_cents))]);
+                web.json(web.status(res, 202), json.stringify(to_json(o)));
+            },
+            Result.Err(e) => fail(ctx, res, e),
+        }
+    });
+    web.GET(app, "/api/orders", fn(ctx: web.Ctx, res: web.Res) {
+        match (list_orders(orders, web.local(ctx, "user"))) {
+            Result.Ok(os) => httpx.ok(res, json.stringify(json.Json.JArray(os.map(to_json)))),
+            Result.Err(e) => fail(ctx, res, e),
+        }
+    });
+    web.GET(app, "/api/orders/:id", fn(ctx: web.Ctx, res: web.Res) {
+        match (get_order(orders, web.local(ctx, "user"), web.param(ctx, "id"))) {
+            Result.Ok(o) => httpx.ok(res, json.stringify(to_json(o))),
+            Result.Err(e) => fail(ctx, res, e),
+        }
+    });
+    app
+}

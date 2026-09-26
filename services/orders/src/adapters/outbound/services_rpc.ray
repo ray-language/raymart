@@ -1,0 +1,100 @@
+// CartGateway (cart.get / cart.clear) and Inventory (products.reserve / commit / release) over
+// the other services' rpc APIs: pooled connections, a deadline per call, and the caller's
+// trace continued as a child span. Domain errors ("<code>: …") pass through; transport
+// failures become "unavailable: …".
+import rpc/rpc;
+import std/json;
+import common/tracing;
+from domain/ports import CartGateway, Inventory;
+from domain/order import CartLine, OrderItem;
+
+fn call(p: rpc.Pool, method: string, params: json.Json, deadline_ms: int, tp: string, who: string) -> Result<json.Json, string> {
+    match (rpc.pool_call_full(p, method, params, deadline_ms, tracing.child_of(tp))) {
+        Result.Ok(j) => Result.Ok(j),
+        Result.Err(e) => {
+            let known = ["not_found:", "invalid:", "out_of_stock:", "conflict:"];
+            for k in known {
+                if (e.starts_with(k)) {
+                    return Result.Err(e);
+                }
+            }
+            Result.Err("unavailable: ${who}: ${e}")
+        },
+    }
+}
+
+fn obj(fields: [(string, json.Json)]) -> json.Json {
+    let m: Map<string, json.Json> = Map.new();
+    for f in fields {
+        m.insert(f.0, f.1);
+    }
+    json.Json.JObject(m)
+}
+
+pub struct CartRpc {
+    pool: rpc.Pool,
+    deadline_ms: int,
+}
+
+pub fn new_cart_rpc(host: string, port: int, deadline_ms: int) -> CartRpc {
+    CartRpc { pool: rpc.pool(host, port, 8), deadline_ms: deadline_ms }
+}
+
+impl CartGateway for CartRpc {
+    fn lines(self, user_id: string, traceparent: string) -> Result<[CartLine], string> {
+        let j = call(self.pool, "cart.get", obj([("user_id", json.Json.JStr(user_id))]), self.deadline_ms, traceparent, "cart")?;
+        var out: [CartLine] = [];
+        for it in json.get_array(j, "items").unwrap_or([]) {
+            out.push(CartLine { product_id: json.get_int(it, "product_id").unwrap_or(0), qty: json.get_int(it, "qty").unwrap_or(0) });
+        }
+        Result.Ok(out)
+    }
+
+    fn clear(self, user_id: string, traceparent: string) -> Result<int, string> {
+        let _ = call(self.pool, "cart.clear", obj([("user_id", json.Json.JStr(user_id))]), self.deadline_ms, traceparent, "cart")?;
+        Result.Ok(1)
+    }
+}
+
+pub struct ProductsRpc {
+    pool: rpc.Pool,
+    deadline_ms: int,
+}
+
+pub fn new_products_rpc(host: string, port: int, deadline_ms: int) -> ProductsRpc {
+    ProductsRpc { pool: rpc.pool(host, port, 8), deadline_ms: deadline_ms }
+}
+
+fn order_param(order_id: string) -> json.Json {
+    obj([("order_id", json.Json.JStr(order_id))])
+}
+
+impl Inventory for ProductsRpc {
+    fn reserve(self, order_id: string, lines: [CartLine], traceparent: string) -> Result<[OrderItem], string> {
+        var ls: [json.Json] = [];
+        for l in lines {
+            ls.push(obj([("product_id", json.Json.JNum(l.product_id as float)), ("qty", json.Json.JNum(l.qty as float))]));
+        }
+        let j = call(self.pool, "products.reserve", obj([("order_id", json.Json.JStr(order_id)), ("lines", json.Json.JArray(ls))]), self.deadline_ms, traceparent, "products")?;
+        var out: [OrderItem] = [];
+        for it in json.get_array(j, "items").unwrap_or([]) {
+            out.push(OrderItem {
+                product_id: json.get_int(it, "product_id").unwrap_or(0),
+                name: json.get_string(it, "name").unwrap_or(""),
+                price_cents: json.get_int(it, "price_cents").unwrap_or(0),
+                qty: json.get_int(it, "qty").unwrap_or(0),
+            });
+        }
+        Result.Ok(out)
+    }
+
+    fn commit(self, order_id: string, traceparent: string) -> Result<int, string> {
+        let j = call(self.pool, "products.commit", order_param(order_id), self.deadline_ms, traceparent, "products")?;
+        Result.Ok(json.get_int(j, "lines").unwrap_or(0))
+    }
+
+    fn release(self, order_id: string, traceparent: string) -> Result<int, string> {
+        let j = call(self.pool, "products.release", order_param(order_id), self.deadline_ms, traceparent, "products")?;
+        Result.Ok(json.get_int(j, "lines").unwrap_or(0))
+    }
+}

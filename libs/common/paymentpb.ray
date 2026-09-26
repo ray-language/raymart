@@ -1,0 +1,89 @@
+// The protobuf codec of proto/payment.proto (package raymart.payment.v1), written by hand on
+// std/protobuf — the contract shared by the payment service (server) and orders (client).
+//
+//   service Payments { CreateIntent(CreateIntentRequest) returns (Intent);
+//                      GetIntent(GetIntentRequest) returns (Intent); }
+import std/protobuf;
+
+pub const SERVICE: string = "/raymart.payment.v1.Payments";
+pub const CREATE_INTENT: string = "/raymart.payment.v1.Payments/CreateIntent";
+pub const GET_INTENT: string = "/raymart.payment.v1.Payments/GetIntent";
+
+pub struct CreateIntentRequest {
+    order_id: string,
+    amount_cents: int,
+    currency: string,
+    card_last4: string,
+    user_id: string,
+}
+
+pub struct GetIntentRequest {
+    id: string,
+}
+
+pub struct Intent {
+    id: string,
+    order_id: string,
+    amount_cents: int,
+    currency: string,
+    status: string,
+    reason: string,
+    user_id: string,
+}
+
+pub fn encode_create(r: CreateIntentRequest) -> bytes {
+    let w = protobuf.writer();
+    protobuf.write_string(w, 1, r.order_id);
+    protobuf.write_varint(w, 2, r.amount_cents);
+    protobuf.write_string(w, 3, r.currency);
+    protobuf.write_string(w, 4, r.card_last4);
+    protobuf.write_string(w, 5, r.user_id);
+    protobuf.finish(w)
+}
+
+pub fn decode_create(b: bytes) -> Result<CreateIntentRequest, string> {
+    let f = protobuf.parse(b)?;
+    Result.Ok(CreateIntentRequest {
+        order_id: protobuf.get_string(f, 1),
+        amount_cents: protobuf.get_int(f, 2),
+        currency: protobuf.get_string(f, 3),
+        card_last4: protobuf.get_string(f, 4),
+        user_id: protobuf.get_string(f, 5),
+    })
+}
+
+pub fn encode_get(r: GetIntentRequest) -> bytes {
+    let w = protobuf.writer();
+    protobuf.write_string(w, 1, r.id);
+    protobuf.finish(w)
+}
+
+pub fn decode_get(b: bytes) -> Result<GetIntentRequest, string> {
+    let f = protobuf.parse(b)?;
+    Result.Ok(GetIntentRequest { id: protobuf.get_string(f, 1) })
+}
+
+pub fn encode_intent(i: Intent) -> bytes {
+    let w = protobuf.writer();
+    protobuf.write_string(w, 1, i.id);
+    protobuf.write_string(w, 2, i.order_id);
+    protobuf.write_varint(w, 3, i.amount_cents);
+    protobuf.write_string(w, 4, i.currency);
+    protobuf.write_string(w, 5, i.status);
+    protobuf.write_string(w, 6, i.reason);
+    protobuf.write_string(w, 7, i.user_id);
+    protobuf.finish(w)
+}
+
+pub fn decode_intent(b: bytes) -> Result<Intent, string> {
+    let f = protobuf.parse(b)?;
+    Result.Ok(Intent {
+        id: protobuf.get_string(f, 1),
+        order_id: protobuf.get_string(f, 2),
+        amount_cents: protobuf.get_int(f, 3),
+        currency: protobuf.get_string(f, 4),
+        status: protobuf.get_string(f, 5),
+        reason: protobuf.get_string(f, 6),
+        user_id: protobuf.get_string(f, 7),
+    })
+}

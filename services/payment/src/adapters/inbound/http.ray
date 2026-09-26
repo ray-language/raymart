@@ -1,0 +1,34 @@
+// The payment HTTP face, behind raygate (JWT; a user sees only their own payments):
+//   GET /api/payments/:id     one payment intent
+//   GET /health
+import web/framework as web;
+import std/json;
+import common/auth;
+import common/httpx;
+from domain/ports import IntentRepository, CardProcessor, Bus;
+from domain/intent import to_json;
+from application/payments import Payments, get_intent;
+
+pub fn build<R: IntentRepository, C: CardProcessor, B: Bus>(payments: Payments<R, C, B>, jwt_secret: string) -> web.App {
+    let app = web.new_app();
+    web.GET(app, "/health", fn(ctx: web.Ctx, res: web.Res) {
+        httpx.ok(res, `{"status":"ok","service":"payment"}`);
+    });
+    web.GET(app, "/api/payments/:id", fn(ctx: web.Ctx, res: web.Res) {
+        let user = match (auth.user_of(web.header_of(ctx, "authorization"), jwt_secret)) {
+            Result.Ok(u) => u,
+            Result.Err(e) => return httpx.error(res, 401, "unauthorized", e),
+        };
+        match (get_intent(payments, web.param(ctx, "id"))) {
+            Result.Ok(i) => {
+                if (i.user_id != user) {
+                    httpx.error(res, 404, "not_found", "no payment ${i.id}");
+                } else {
+                    httpx.ok(res, json.stringify(to_json(i)));
+                }
+            },
+            Result.Err(e) => httpx.fail(res, e),
+        }
+    });
+    app
+}
