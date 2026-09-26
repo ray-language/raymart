@@ -1,0 +1,12 @@
+# Shared building blocks of the raymart services: configuration, logging, auth, HTTP
+# responses, trace propagation, the rayq client and the event envelope. Imported by path
+# (`common = "path:../../libs/common"`) as `common/<module>`.
+[package]
+name = "common"
+version = "0.1.0"
+entry = "config.ray"
+
+[dependencies]
+net = "^0.3.5"
+rpc = "^0.1.0"
+web = "^0.4.4"

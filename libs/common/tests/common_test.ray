@@ -1,0 +1,58 @@
+import config;
+import auth;
+import httpx;
+import tracing;
+import events;
+import std/json;
+
+@test
+fn config_falls_back_when_unset() {
+    assert_eq(config.get("RAYMART_SURELY_UNSET", "dflt"), "dflt");
+    assert_eq(config.get_int("RAYMART_SURELY_UNSET", 42), 42);
+}
+
+@test
+fn a_token_round_trips_to_its_user() {
+    let t = auth.token_for("ada", "s3cret", 60);
+    assert_eq(auth.user_of("Bearer " + t, "s3cret").unwrap_or("?"), "ada");
+    assert(auth.user_of("Bearer " + t, "other").is_err());
+    assert(auth.user_of(t, "s3cret").is_err());
+}
+
+@test
+fn an_expired_token_is_refused() {
+    let t = auth.token_for("ada", "s3cret", -10);
+    assert(auth.user_of("Bearer " + t, "s3cret").is_err());
+}
+
+@test
+fn domain_errors_map_to_http() {
+    let p = httpx.split_error("not_found: no product 7");
+    assert_eq(p.0, "not_found");
+    assert_eq(p.1, "no product 7");
+    assert_eq(httpx.domain_status("out_of_stock"), 409);
+    assert_eq(httpx.split_error("boom").0, "internal");
+}
+
+@test
+fn a_child_span_keeps_the_trace() {
+    let parent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+    let child = tracing.child_of(parent);
+    assert_eq(tracing.trace_id(child), "0af7651916cd43dd8448eb211c80319c");
+    assert(child != parent);
+    assert_eq(tracing.trace_id("garbage"), "");
+}
+
+@test
+fn events_round_trip() {
+    let e = events.new_event("payment.requested", "tp", json.Json.JNum(3.0));
+    match (events.decode(events.encode(e))) {
+        Result.Ok(d) => {
+            assert_eq(d.kind, "payment.requested");
+            assert_eq(d.id, e.id);
+            assert_eq(d.traceparent, "tp");
+        },
+        Result.Err(err) => panic(err),
+    }
+    assert(events.decode(`{"id":"x"}`).is_err());
+}

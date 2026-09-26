@@ -1,0 +1,52 @@
+// The HTTP face every service shares: JSON bodies and one error shape,
+// `{"error": {"code": "...", "message": "..."}}`, so clients handle failures uniformly.
+import web/framework as web;
+import std/json;
+
+pub fn ok(res: web.Res, body: string) {
+    web.json(res, body);
+}
+
+pub fn created(res: web.Res, body: string) {
+    web.json(web.status(res, 201), body);
+}
+
+pub fn error(res: web.Res, status: int, code: string, message: string) {
+    let inner = json.obj().field("code", code).field("message", message);
+    web.json(web.status(res, status), "{\"error\":" + json.render(inner) + "}");
+}
+
+/// Maps a domain error to its HTTP status. Domain errors are "<code>: <message>" strings
+/// (see `domain_error`), where the code names the kind of failure.
+pub fn domain_status(code: string) -> int {
+    if (code == "not_found") {
+        return 404;
+    }
+    if (code == "invalid") {
+        return 400;
+    }
+    if (code == "conflict" || code == "out_of_stock") {
+        return 409;
+    }
+    if (code == "unauthorized") {
+        return 401;
+    }
+    if (code == "unavailable") {
+        return 503;
+    }
+    500
+}
+
+/// Splits "<code>: <message>" into its parts ("internal" when there is no code).
+pub fn split_error(e: string) -> (string, string) {
+    match (e.index_of(": ")) {
+        Option.Some(i) => (e.substring(0, i), e.substring(i + 2, e.len())),
+        Option.None => ("internal", e),
+    }
+}
+
+/// Answers a failed use case with its mapped status.
+pub fn fail(res: web.Res, e: string) {
+    let parts = split_error(e);
+    error(res, domain_status(parts.0), parts.0, parts.1);
+}

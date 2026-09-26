@@ -1,0 +1,64 @@
+# raymart: the whole system in containers. `make up` builds and starts it.
+# Only the gateway (8088) and the health dashboard (8091) are published on the host; the
+# databases, the queue and the services talk on the compose network only.
+
+x-raylang-build: &raylang-build
+  context: .
+  dockerfile: docker/Dockerfile
+  target: runtime
+
+services:
+  # ---- infrastructure ----
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: products
+      POSTGRES_PASSWORD: products
+      POSTGRES_DB: products
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U products -d products"]
+      interval: 3s
+      retries: 20
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: orders
+      MYSQL_USER: orders
+      MYSQL_PASSWORD: orders
+    volumes: [mysql-data:/var/lib/mysql]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uorders -porders --silent"]
+      interval: 3s
+      retries: 40
+
+  mongo:
+    image: mongo:7
+    volumes: [mongo-data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
+      interval: 3s
+      retries: 20
+
+  raykv:
+    build:
+      <<: *raylang-build
+      args: { APP_REPO: "https://github.com/ray-language/raykv.git", APP_REF: "9b40c00" }
+    command: ["--bind", "0.0.0.0", "--port", "7379", "--dir", "/data"]
+    volumes: [raykv-data:/data]
+
+  rayq:
+    build:
+      <<: *raylang-build
+      args: { APP_REPO: "https://github.com/ray-language/rayq.git", APP_REF: "7bb2f82" }
+    command: ["serve", "--bind", "0.0.0.0", "--port", "7450", "--dir", "/data"]
+    volumes: [rayq-data:/data]
+
+volumes:
+  postgres-data:
+  mysql-data:
+  mongo-data:
+  raykv-data:
+  rayq-data:

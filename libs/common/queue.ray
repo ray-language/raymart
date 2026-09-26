@@ -1,0 +1,52 @@
+// The rayq client the services use (rayq speaks packages/rpc): push a message, pull the next
+// one, ack or nack it. Delivery is at-least-once: consumers must tolerate duplicates.
+import rpc/rpc;
+import std/json;
+
+pub struct Message {
+    id: string,
+    body: string,
+    attempt: int,
+}
+
+fn params(fields: [(string, string)]) -> json.Json {
+    let m: Map<string, json.Json> = Map.new();
+    for f in fields {
+        m.insert(f.0, json.Json.JStr(f.1));
+    }
+    json.Json.JObject(m)
+}
+
+/// Pushes `body` onto `queue`; returns the message id.
+pub fn push(p: rpc.Pool, queue: string, body: string) -> Result<string, string> {
+    let r = rpc.pool_call(p, "push", params([("queue", queue), ("body", body)]))?;
+    match (json.get_string(r, "id")) {
+        Option.Some(id) => Result.Ok(id),
+        Option.None => Result.Err("rayq push: no id in reply"),
+    }
+}
+
+/// The next ready message of `queue`, or None when it is empty.
+pub fn pull(p: rpc.Pool, queue: string) -> Result<Option<Message>, string> {
+    let r = rpc.pool_call(p, "pull", params([("queue", queue)]))?;
+    match (json.get_string(r, "id")) {
+        Option.Some(id) => Result.Ok(Option.Some(Message {
+            id: id,
+            body: json.get_string(r, "body").unwrap_or(""),
+            attempt: json.get_int(r, "attempt").unwrap_or(1),
+        })),
+        Option.None => Result.Ok(Option.None),
+    }
+}
+
+pub fn ack(p: rpc.Pool, queue: string, id: string) -> Result<int, string> {
+    let _ = rpc.pool_call(p, "ack", params([("queue", queue), ("id", id)]))?;
+    Result.Ok(0)
+}
+
+/// Returns the message to the queue now (a failed attempt; rayq applies backoff and, past
+/// its max attempts, moves it to the dead-letter queue).
+pub fn nack(p: rpc.Pool, queue: string, id: string) -> Result<int, string> {
+    let _ = rpc.pool_call(p, "nack", params([("queue", queue), ("id", id)]))?;
+    Result.Ok(0)
+}
