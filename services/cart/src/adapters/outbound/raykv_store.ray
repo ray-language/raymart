@@ -35,8 +35,7 @@ fn dial(s: RaykvCarts) -> Result<redis.Conn, string> {
 // restarted, or closed it while idle) is replaced and the command runs once more
 // (common/pool.ray). A server-side error reply (Reply.Err) leaves the connection in sync.
 fn with_conn(s: RaykvCarts, args: [string]) -> Result<redis.Reply, string> {
-    // Annotated: raylang 1.27.14 cannot build this natively otherwise (RAYLANG-FINDINGS #92).
-    let r: Result<redis.Reply, string> = pool.run(s.conns, true, fn() -> Result<redis.Conn, string> { dial(s) }, fn(c: redis.Conn) {
+    let r = pool.run(s.conns, true, fn() -> Result<redis.Conn, string> { dial(s) }, fn(c: redis.Conn) {
         redis.close_conn(c);
     }, fn(c: redis.Conn) -> Result<redis.Reply, string> { redis.command(c, args) });
     match (r) {

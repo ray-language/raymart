@@ -141,7 +141,7 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
 
 | Qué | Verificado |
 |---|---|
-| Tests unitarios | common 12 · grpc 12 · products 13 · cart 7 · orders 15 · payment 10 · tools 10 — con la release 1.27.14, en VM y en nativo |
+| Tests unitarios | common 12 · grpc 12 · products 13 · cart 7 · orders 15 · payment 10 · tools 10 — con la release 1.27.15, en VM y en nativo |
 | Integración | PostgreSQL 18: 5 (seis pedidos por la última unidad: gana uno; conexiones matadas por el servidor) · raykv: 2 (con TTL) · MySQL 8.4: 4 (pedido + outbox atómicos; conexiones matadas) · MongoDB 8: 2 (cinco CreateIntent concurrentes: un intent) |
 | gRPC | contrato payment en proceso; interop con `grpcurl` (librería) |
 | Docker | las 11 piezas sanas; `make e2e` 19/19; `make chaos` pendiente → pagado; `make chaos-db` 19/19 tras reiniciar las bases; raywatch 11/11 en verde |
@@ -156,7 +156,7 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
   `PG_POOL_SIZE`, `MYSQL_POOL_SIZE`, `MONGO_POOL_SIZE`, `RAYKV_POOL_SIZE`, `RPC_POOL_SIZE`.
 - **El estado vive en las bases de datos.** Los handlers gRPC y HTTP reciben una *copia* de lo
   que capturan (por conexión), así que nada en memoria del proceso es estado compartido.
-- **Toolchain.** Las imágenes usan la release 1.27.14 (cada `ray.toml` la exige con
+- **Toolchain.** Las imágenes usan la release 1.27.15 (cada `ray.toml` la exige con
   `[package] raylang`); `make check-release` y
   `make check-release-it` corren los tests con ella en un contenedor, así que no dependen del
   toolchain del host. `make test` y `make test-it` usan el `ray` local.

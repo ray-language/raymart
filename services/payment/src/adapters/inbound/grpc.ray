@@ -48,8 +48,7 @@ fn traceparent_of(c: Call) -> string {
 }
 
 pub fn router<R: IntentRepository, C: CardProcessor, B: Bus>(p: Payments<R, C, B>) -> Router {
-    server
-        .router()
+    server.router()
         .route(paymentpb.CREATE_INTENT, fn(c: Call) -> Result<bytes, Status> {
         let req = match (paymentpb.decode_create(c.message)) {
             Result.Ok(r) => r,

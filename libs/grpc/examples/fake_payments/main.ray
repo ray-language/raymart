@@ -131,8 +131,7 @@ fn get_intent(ops: Channel<Op>, c: Call) -> Result<bytes, Status> {
 }
 
 fn build(ops: Channel<Op>) -> Router {
-    server
-        .router()
+    server.router()
         .route(CREATE, fn(c: Call) -> Result<bytes, Status> { create_intent(ops, c) })
         .route(GET, fn(c: Call) -> Result<bytes, Status> { get_intent(ops, c) })
         .route("/raymart.test.v1.Slow/Wait", fn(c: Call) -> Result<bytes, Status> {
