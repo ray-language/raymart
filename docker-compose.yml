@@ -60,6 +60,11 @@ services:
       args: { APP_REPO: "https://github.com/ray-language/raykv.git", APP_REF: "9b40c00" }
     command: ["--bind", "0.0.0.0", "--port", "7379", "--dir", "/data"]
     volumes: [raykv-data:/data]
+    # The image holds only the binary; bash (from debian-slim) opens the port.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/7379"]
+      interval: 2s
+      retries: 30
 
   rayq:
     build:
@@ -67,6 +72,10 @@ services:
       args: { APP_REPO: "https://github.com/ray-language/rayq.git", APP_REF: "7bb2f82" }
     command: ["serve", "--bind", "0.0.0.0", "--port", "7450", "--dir", "/data"]
     volumes: [rayq-data:/data]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/7450"]
+      interval: 2s
+      retries: 30
 
   # ---- services (hexagonal APIs) ----
   products:
@@ -102,7 +111,7 @@ services:
       HTTP_PORT: "8080"
       RPC_PORT: "9000"
     depends_on:
-      raykv: { condition: service_started }
+      raykv: { condition: service_healthy }
       products: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "/usr/local/bin/app", "health"]
@@ -131,7 +140,7 @@ services:
       HTTP_PORT: "8080"
     depends_on:
       mysql: { condition: service_healthy }
-      rayq: { condition: service_started }
+      rayq: { condition: service_healthy }
       cart: { condition: service_healthy }
       products: { condition: service_healthy }
     healthcheck:
@@ -156,7 +165,7 @@ services:
       GRPC_PORT: "9100"
     depends_on:
       mongo: { condition: service_healthy }
-      rayq: { condition: service_started }
+      rayq: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "/usr/local/bin/app", "health"]
       interval: 3s
@@ -166,7 +175,7 @@ services:
   raygate:
     build:
       <<: *raylang-build
-      args: { APP_REPO: "https://github.com/ray-language/raygate.git", APP_REF: "c58903b" }
+      args: { APP_REPO: "https://github.com/ray-language/raygate.git", APP_REF: "772c43d" }
     command: ["--config", "/etc/raygate/raygate.toml"]
     volumes: [./config/raygate.toml:/etc/raygate/raygate.toml:ro]
     ports: ["127.0.0.1:8088:8080"]

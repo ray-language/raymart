@@ -5,10 +5,6 @@ RAY_PROJECTS := libs/common $(wildcard services/*) $(wildcard libs/grpc) $(wildc
 
 .DEFAULT_GOAL := help
 
-# The test stores' published ports; raykv and rayq have no healthcheck (their images hold only
-# the binary), so `--wait` does not cover them: wait until every port accepts connections.
-TEST_PORTS := 55432 53306 57017 57379 57450
-WAIT_STORES = for port in $(TEST_PORTS); do i=0; until nc -z 127.0.0.1 $$port 2>/dev/null; do i=$$((i+1)); [ $$i -lt 60 ] || { echo "port $$port is not accepting connections" >&2; exit 1; }; sleep 0.5; done; done
 .PHONY: help up down build ps logs test test-it check-release-it check-release cli e2e token chaos chaos-db trace log-stats bench bench-quick
 
 help: ## List the targets
@@ -34,12 +30,10 @@ test: ## Unit tests of every raylang project (no containers needed)
 
 test-it: ## Adapter integration tests against the stores in Docker (published on 127.0.0.1 high ports)
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.test.yml up -d --wait postgres mysql mongo raykv rayq
-	@$(WAIT_STORES)
 	@set -e; for p in $(wildcard services/*); do echo "== $$p"; (cd $$p && RAYMART_IT=1 ray test </dev/null); done
 
 check-release-it: ## Integration tests with the RELEASE toolchain, from a container (stores via host.docker.internal)
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.test.yml up -d --wait postgres mysql mongo raykv rayq
-	@$(WAIT_STORES)
 	docker build -q -f docker/Dockerfile --target toolchain -t raymart-toolchain . >/dev/null
 	@set -e; for p in $(wildcard services/*); do echo "== $$p"; docker run --rm -v "$$PWD":/src -w /src/$$p -e RAYMART_IT=1 -e RAYMART_IT_HOST=host.docker.internal raymart-toolchain sh -c 'ray fetch >/dev/null && ray test </dev/null'; done
 
