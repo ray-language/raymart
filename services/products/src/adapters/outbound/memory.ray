@@ -1,0 +1,94 @@
+// In-memory ProductRepository: the tests' adapter (and a reference for the semantics the
+// PostgreSQL adapter must match).
+from domain/ports import ProductRepository;
+from domain/product import Product, Line, Reserved, has_stock;
+
+pub struct MemoryProducts {
+    products: [Product],
+    // order id → (status, lines)
+    reservations: Map<string, (string, [Reserved])>,
+}
+
+pub fn new_memory(products: [Product]) -> MemoryProducts {
+    let r: Map<string, (string, [Reserved])> = Map.new();
+    MemoryProducts { products: products, reservations: r }
+}
+
+fn index_of(m: MemoryProducts, id: int) -> Option<int> {
+    for i in 0..m.products.len() {
+        if (m.products[i].id == id) {
+            return Option.Some(i);
+        }
+    }
+    Option.None
+}
+
+impl ProductRepository for MemoryProducts {
+    fn list(self) -> Result<[Product], string> {
+        Result.Ok(self.products)
+    }
+
+    fn find(self, id: int) -> Result<Option<Product>, string> {
+        match (index_of(self, id)) {
+            Option.Some(i) => Result.Ok(Option.Some(self.products[i])),
+            Option.None => Result.Ok(Option.None),
+        }
+    }
+
+    fn reserve(self, order_id: string, lines: [Line]) -> Result<[Reserved], string> {
+        match (self.reservations.get(order_id)) {
+            Option.Some(existing) => return Result.Ok(existing.1),
+            Option.None => { },
+        }
+        // Check every line first: all or nothing.
+        for l in lines {
+            match (index_of(self, l.product_id)) {
+                Option.Some(i) => {
+                    if (!has_stock(self.products[i], l.qty)) {
+                        return Result.Err("out_of_stock: product ${l.product_id} has ${self.products[i].stock} left");
+                    }
+                },
+                Option.None => return Result.Err("not_found: no product ${l.product_id}"),
+            }
+        }
+        var out: [Reserved] = [];
+        for l in lines {
+            let i = index_of(self, l.product_id).unwrap_or(0);
+            let p = self.products[i];
+            self.products[i] = Product { id: p.id, sku: p.sku, name: p.name, price_cents: p.price_cents, stock: p.stock - l.qty };
+            out.push(Reserved { product_id: p.id, name: p.name, price_cents: p.price_cents, qty: l.qty });
+        }
+        self.reservations.insert(order_id, ("reserved", out));
+        Result.Ok(out)
+    }
+
+    fn commit(self, order_id: string) -> Result<int, string> {
+        match (self.reservations.get(order_id)) {
+            Option.Some(r) => {
+                if (r.0 == "reserved") {
+                    self.reservations.insert(order_id, ("committed", r.1));
+                }
+                Result.Ok(r.1.len())
+            },
+            Option.None => Result.Err("not_found: no reservation for order ${order_id}"),
+        }
+    }
+
+    fn release(self, order_id: string) -> Result<int, string> {
+        match (self.reservations.get(order_id)) {
+            Option.Some(r) => {
+                if (r.0 != "reserved") {
+                    return Result.Ok(0); // already released, or final
+                }
+                for line in r.1 {
+                    let i = index_of(self, line.product_id).unwrap_or(0);
+                    let p = self.products[i];
+                    self.products[i] = Product { id: p.id, sku: p.sku, name: p.name, price_cents: p.price_cents, stock: p.stock + line.qty };
+                }
+                self.reservations.insert(order_id, ("released", r.1));
+                Result.Ok(r.1.len())
+            },
+            Option.None => Result.Ok(0),
+        }
+    }
+}

@@ -1,0 +1,99 @@
+// The PostgreSQL adapter against a real database (docker-compose.test.yml, `make test-it`).
+// Skipped unless RAYMART_IT=1.
+import db/postgres as pg;
+import std/crypto;
+import std/hex;
+from domain/ports import ProductRepository;
+from domain/product import Line, Reserved;
+import adapters/outbound/postgres;
+
+fn enabled() -> bool {
+    env("RAYMART_IT").unwrap_or("") == "1"
+}
+
+fn repo() -> postgres.PostgresProducts {
+    postgres.PostgresProducts { host: "127.0.0.1", port: 55432, user: "products", password: "products", database: "products" }
+}
+
+fn stock(id: int) -> int {
+    match (repo().find(id)) {
+        Result.Ok(Option.Some(p)) => p.stock,
+        _ => -1,
+    }
+}
+
+fn set_stock(id: int, n: int) {
+    let c = match (pg.connect("127.0.0.1", 55432, "products", "products", "products", hex.hex_encode(crypto.random_bytes(12)))) {
+        Result.Ok(c) => c,
+        Result.Err(e) => panic(e),
+    };
+    let _ = pg.exec(c, "UPDATE products SET stock = $1 WHERE id = $2", [to_string(n), to_string(id)]);
+    pg.disconnect(c);
+}
+
+fn order_id(tag: string) -> string {
+    tag + "-" + hex.hex_encode(crypto.random_bytes(6))
+}
+
+@test
+fn postgres_reserves_commits_and_releases() {
+    if (!enabled()) {
+        return;
+    }
+    match (postgres.migrate(repo(), 10)) {
+        Result.Ok(_) => { },
+        Result.Err(e) => panic(e),
+    }
+    set_stock(2, 10);
+    let o = order_id("it");
+    let r = repo().reserve(o, [Line { product_id: 2, qty: 3 }]);
+    assert(r.is_ok());
+    assert_eq(stock(2), 7);
+    assert_eq(repo().reserve(o, [Line { product_id: 2, qty: 3 }]).unwrap_or([]).len(), 1); // idempotent
+    assert_eq(stock(2), 7);
+    assert_eq(repo().release(o).unwrap_or(-1), 1);
+    assert_eq(stock(2), 10);
+    assert_eq(repo().release(o).unwrap_or(-1), 0);
+
+    let paid = order_id("paid");
+    let _ = repo().reserve(paid, [Line { product_id: 2, qty: 1 }]);
+    let _ = repo().commit(paid);
+    assert_eq(repo().release(paid).unwrap_or(-1), 0);
+    assert_eq(stock(2), 9);
+}
+
+@test
+fn postgres_all_or_nothing_rolls_back() {
+    if (!enabled()) {
+        return;
+    }
+    set_stock(2, 5);
+    set_stock(4, 1);
+    let r = repo().reserve(order_id("aon"), [Line { product_id: 2, qty: 2 }, Line { product_id: 4, qty: 2 }]);
+    assert(r.is_err());
+    assert_eq(stock(2), 5);
+    assert_eq(stock(4), 1);
+}
+
+@test
+fn postgres_the_last_unit_goes_to_one_order() {
+    if (!enabled()) {
+        return;
+    }
+    set_stock(4, 1);
+    let results: Channel<bool> = Channel.new();
+    for i in 0..6 {
+        let id = order_id("race${i}");
+        spawn(fn() {
+            send(results, repo().reserve(id, [Line { product_id: 4, qty: 1 }]).is_ok());
+        });
+    }
+    var won = 0;
+    for _ in 0..6 {
+        if (recv(results).unwrap_or(false)) {
+            won = won + 1;
+        }
+    }
+    assert_eq(won, 1);
+    assert_eq(stock(4), 0);
+}

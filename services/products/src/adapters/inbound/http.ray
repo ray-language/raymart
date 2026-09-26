@@ -1,0 +1,42 @@
+// The catalog's HTTP face, behind raygate (`/api/products…` is routed here unchanged):
+//   GET /api/products        the catalog
+//   GET /api/products/:id    one product
+//   GET /health              liveness, for raywatch and the container healthcheck
+import web/framework as web;
+import std/json;
+import common/httpx;
+import common/logs;
+import common/tracing;
+from domain/ports import ProductRepository;
+from domain/product import to_json;
+from application/catalog import Catalog, list_products, get_product;
+
+pub fn build<R: ProductRepository>(catalog: Catalog<R>) -> web.App {
+    let app = web.new_app();
+    web.GET(app, "/health", fn(ctx: web.Ctx, res: web.Res) {
+        httpx.ok(res, `{"status":"ok","service":"products"}`);
+    });
+    web.GET(app, "/api/products", fn(ctx: web.Ctx, res: web.Res) {
+        match (list_products(catalog)) {
+            Result.Ok(ps) => httpx.ok(res, json.stringify(json.Json.JArray(ps.map(to_json)))),
+            Result.Err(e) => fail(ctx, res, e),
+        }
+    });
+    web.GET(app, "/api/products/:id", fn(ctx: web.Ctx, res: web.Res) {
+        match (parse_int(web.param(ctx, "id"))) {
+            Option.Some(id) => {
+                match (get_product(catalog, id)) {
+                    Result.Ok(p) => httpx.ok(res, json.stringify(to_json(p))),
+                    Result.Err(e) => fail(ctx, res, e),
+                }
+            },
+            Option.None => httpx.error(res, 400, "invalid", "product id must be a number"),
+        }
+    });
+    app
+}
+
+fn fail(ctx: web.Ctx, res: web.Res, e: string) {
+    logs.warn("products", tracing.trace_id(web.header_of(ctx, "traceparent")), "request failed", [("path", ctx.path), ("error", e)]);
+    httpx.fail(res, e);
+}
