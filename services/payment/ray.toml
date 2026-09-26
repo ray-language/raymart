@@ -1,0 +1,11 @@
+[package]
+name = "payment"
+version = "0.1.0"
+
+[dependencies]
+common = "path:../../libs/common"
+grpc = "path:../../libs/grpc"
+net = "^0.3.5"
+rpc = "^0.1.0"
+web = "^0.4.4"
+mongodb = "path:../../libs/mongodb"

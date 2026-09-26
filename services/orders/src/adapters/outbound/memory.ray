@@ -1,0 +1,176 @@
+// In-memory adapters for the tests: the repository and doubles of the three other services.
+from domain/ports import OrderRepository, CartGateway, Inventory, Payments;
+from domain/order import Order, OrderItem, CartLine, OutboxEntry;
+
+pub struct MemoryOrders {
+    orders: Map<string, Order>,
+    outbox: [OutboxEntry],
+    sent: [int],
+    fail_create: [bool],
+}
+
+/// Outbox messages not delivered yet (a test helper).
+pub fn pending_outbox_count(m: MemoryOrders) -> int {
+    m.outbox.filter(fn(e: OutboxEntry) -> bool { !m.sent.contains(e.id) }).len()
+}
+
+pub fn new_memory_orders() -> MemoryOrders {
+    let m: Map<string, Order> = Map.new();
+    MemoryOrders { orders: m, outbox: [], sent: [], fail_create: [false] }
+}
+
+impl OrderRepository for MemoryOrders {
+    fn create(self, order: Order, outbox_kind: string, outbox_payload: string) -> Result<int, string> {
+        if (self.fail_create[0]) {
+            return Result.Err("unavailable: orders database: down");
+        }
+        self.orders.insert(order.id, order);
+        self.outbox.push(OutboxEntry { id: self.outbox.len() + 1, order_id: order.id, kind: outbox_kind, payload: outbox_payload });
+        Result.Ok(1)
+    }
+
+    fn find(self, id: string) -> Result<Option<Order>, string> {
+        Result.Ok(self.orders.get(id))
+    }
+
+    fn list_for(self, user_id: string) -> Result<[Order], string> {
+        var out: [Order] = [];
+        for o in self.orders.values() {
+            if (o.user_id == user_id) {
+                out.push(o);
+            }
+        }
+        Result.Ok(out)
+    }
+
+    fn transition(self, id: string, from: string, to: string, payment_id: string, reason: string) -> Result<bool, string> {
+        match (self.orders.get(id)) {
+            Option.Some(o) => {
+                if (o.status != from) {
+                    return Result.Ok(false);
+                }
+                self.orders.insert(id, Order { id: o.id, user_id: o.user_id, status: to, items: o.items, total_cents: o.total_cents, created_ms: o.created_ms, payment_id: payment_id, reason: reason });
+                Result.Ok(true)
+            },
+            Option.None => Result.Ok(false),
+        }
+    }
+
+    fn pending_outbox(self, limit: int) -> Result<[OutboxEntry], string> {
+        var out: [OutboxEntry] = [];
+        for e in self.outbox {
+            if (!self.sent.contains(e.id) && out.len() < limit) {
+                out.push(e);
+            }
+        }
+        Result.Ok(out)
+    }
+
+    fn mark_sent(self, outbox_id: int) -> Result<int, string> {
+        self.sent.push(outbox_id);
+        Result.Ok(1)
+    }
+}
+
+pub struct FakeCart {
+    lines: Map<string, [CartLine]>,
+}
+
+pub fn new_fake_cart() -> FakeCart {
+    let m: Map<string, [CartLine]> = Map.new();
+    FakeCart { lines: m }
+}
+
+impl CartGateway for FakeCart {
+    fn lines(self, user_id: string, traceparent: string) -> Result<[CartLine], string> {
+        Result.Ok(self.lines.get(user_id).unwrap_or([]))
+    }
+
+    fn clear(self, user_id: string, traceparent: string) -> Result<int, string> {
+        self.lines.remove(user_id);
+        Result.Ok(1)
+    }
+}
+
+/// Stock per product; prices are fixed at 1000 cents; records every operation.
+pub struct FakeInventory {
+    stock: Map<int, int>,
+    reserved: Map<string, [CartLine]>,
+    log: [string],
+    down: [bool],
+}
+
+pub fn new_fake_inventory(stock: [(int, int)]) -> FakeInventory {
+    let m: Map<int, int> = Map.new();
+    for s in stock {
+        m.insert(s.0, s.1);
+    }
+    let r: Map<string, [CartLine]> = Map.new();
+    FakeInventory { stock: m, reserved: r, log: [], down: [false] }
+}
+
+impl Inventory for FakeInventory {
+    fn reserve(self, order_id: string, lines: [CartLine], traceparent: string) -> Result<[OrderItem], string> {
+        for l in lines {
+            if (self.stock.get(l.product_id).unwrap_or(0) < l.qty) {
+                return Result.Err("out_of_stock: product ${l.product_id}");
+            }
+        }
+        var out: [OrderItem] = [];
+        for l in lines {
+            self.stock.insert(l.product_id, self.stock.get(l.product_id).unwrap_or(0) - l.qty);
+            out.push(OrderItem { product_id: l.product_id, name: "p${l.product_id}", price_cents: 1000, qty: l.qty });
+        }
+        self.reserved.insert(order_id, lines);
+        self.log.push("reserve " + order_id);
+        Result.Ok(out)
+    }
+
+    fn commit(self, order_id: string, traceparent: string) -> Result<int, string> {
+        if (self.down[0]) {
+            return Result.Err("unavailable: products: down");
+        }
+        self.log.push("commit " + order_id);
+        self.reserved.remove(order_id);
+        Result.Ok(1)
+    }
+
+    fn release(self, order_id: string, traceparent: string) -> Result<int, string> {
+        if (self.down[0]) {
+            return Result.Err("unavailable: products: down");
+        }
+        self.log.push("release " + order_id);
+        for l in self.reserved.get(order_id).unwrap_or([]) {
+            self.stock.insert(l.product_id, self.stock.get(l.product_id).unwrap_or(0) + l.qty);
+        }
+        self.reserved.remove(order_id);
+        Result.Ok(1)
+    }
+}
+
+/// Accepts payment requests (or refuses them while `down`); keeps what it received.
+pub struct FakePayments {
+    received: [string],
+    down: [bool],
+    // Requests for these orders are rejected as invalid (a permanent error).
+    reject: [string],
+}
+
+pub fn new_fake_payments() -> FakePayments {
+    FakePayments { received: [], down: [false], reject: [] }
+}
+
+impl Payments for FakePayments {
+    fn create_intent(self, request_json: string, traceparent: string) -> Result<string, string> {
+        if (self.down[0]) {
+            return Result.Err("unavailable: payment: down");
+        }
+        for o in self.reject {
+            if (request_json.contains(o)) {
+                return Result.Err("invalid: payment: the amount must be positive");
+            }
+        }
+        self.received.push(request_json);
+        Result.Ok("pi_${self.received.len()}")
+    }
+}

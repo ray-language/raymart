@@ -1,0 +1,60 @@
+// The payment service's gRPC face (proto/payment.proto), served on the raymart gRPC server:
+//   CreateIntent  — called by orders' outbox relay; idempotent per order
+//   GetIntent
+// Domain errors map to gRPC codes: invalid → INVALID_ARGUMENT (3), not_found → NOT_FOUND (5),
+// unavailable → UNAVAILABLE (14), anything else → INTERNAL (13).
+import std/time;
+import std/uuid;
+import grpc/server;
+import grpc/status;
+import common/paymentpb;
+import common/httpx;
+import common/logs;
+import common/tracing;
+from grpc/server import Call, Router;
+from grpc/status import Status;
+from domain/ports import IntentRepository, CardProcessor, Bus;
+from domain/intent import Intent;
+from application/payments import Payments, create_intent, get_intent;
+
+fn to_pb(i: Intent) -> paymentpb.Intent {
+    paymentpb.Intent { id: i.id, order_id: i.order_id, amount_cents: i.amount_cents, currency: i.currency, status: i.status, reason: i.reason, user_id: i.user_id }
+}
+
+fn to_status(e: string) -> Status {
+    let parts = httpx.split_error(e);
+    let code = if (parts.0 == "invalid") { 3 } else if (parts.0 == "not_found") { 5 } else if (parts.0 == "unavailable") { 14 } else { 13 };
+    status.new(code, parts.1)
+}
+
+fn traceparent_of(c: Call) -> string {
+    c.metadata.get("traceparent").unwrap_or("")
+}
+
+pub fn router<R: IntentRepository, C: CardProcessor, B: Bus>(p: Payments<R, C, B>) -> Router {
+    server.router()
+        .route(paymentpb.CREATE_INTENT, fn(c: Call) -> Result<bytes, Status> {
+            let req = match (paymentpb.decode_create(c.message)) {
+                Result.Ok(r) => r,
+                Result.Err(e) => return Result.Err(status.new(3, "malformed CreateIntentRequest: " + e)),
+            };
+            let tp = traceparent_of(c);
+            match (create_intent(p, uuid.uuid_v7(), req.order_id, req.user_id, req.amount_cents, req.currency, req.card_last4, time.now(), tp)) {
+                Result.Ok(i) => {
+                    logs.info("payment", tracing.trace_id(tp), "intent", [("intent_id", i.id), ("order_id", i.order_id), ("status", i.status)]);
+                    Result.Ok(paymentpb.encode_intent(to_pb(i)))
+                },
+                Result.Err(e) => Result.Err(to_status(e)),
+            }
+        })
+        .route(paymentpb.GET_INTENT, fn(c: Call) -> Result<bytes, Status> {
+            let req = match (paymentpb.decode_get(c.message)) {
+                Result.Ok(r) => r,
+                Result.Err(e) => return Result.Err(status.new(3, "malformed GetIntentRequest: " + e)),
+            };
+            match (get_intent(p, req.id)) {
+                Result.Ok(i) => Result.Ok(paymentpb.encode_intent(to_pb(i))),
+                Result.Err(e) => Result.Err(to_status(e)),
+            }
+        })
+}

@@ -131,6 +131,8 @@ pub fn serve_router_until(
             Option.None => return Result.Ok(0),
         }
     }
+    // (release 1.27.11 does not treat `while (true)` as diverging)
+    Result.Err("unreachable: the accept loop only returns from inside")
 }
 
 /// Serves until a value arrives on `stop` (any but 28, SIGWINCH) or it is closed; pass
@@ -155,6 +157,8 @@ pub fn serve_until(
             Option.None => return Result.Ok(0),
         }
     }
+    // (release 1.27.11 does not treat `while (true)` as diverging)
+    Result.Err("unreachable: the accept loop only returns from inside")
 }
 
 // The next accepted connection; None once `stop` fires (the listener is then closed). Accepts
@@ -187,6 +191,8 @@ fn next_conn(l: Listener, stop: Channel<int>) -> Result<Option<int>, string> {
             },
         }
     }
+    // (release 1.27.11 does not treat `while (true)` as diverging)
+    Result.Err("unreachable: the loop only returns from inside")
 }
 
 // The request state of one stream.
@@ -288,6 +294,8 @@ fn run_conn(l: h2.Link, opts: Options, r: Router) -> Result<int, string> {
             return Result.Ok(0);
         }
     }
+    // (release 1.27.11 does not treat `while (true)` as diverging)
+    Result.Err("unreachable: the frame loop only returns from inside")
 }
 
 // Updates the stream table with a HEADERS / DATA / RST_STREAM frame; streams whose request

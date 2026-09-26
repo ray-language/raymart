@@ -1,0 +1,79 @@
+// The MySQL adapter against the container (docker-compose.test.yml). Skipped unless RAYMART_IT=1.
+import std/crypto;
+import std/hex;
+from domain/ports import OrderRepository;
+from domain/order import Order, OrderItem, OutboxEntry, new_order, PENDING, PAID;
+import adapters/outbound/mysql_orders;
+
+fn enabled() -> bool {
+    env("RAYMART_IT").unwrap_or("") == "1"
+}
+
+fn repo() -> mysql_orders.MysqlOrders {
+    mysql_orders.MysqlOrders { host: "127.0.0.1", port: 53306, user: "orders", password: "orders", database: "orders" }
+}
+
+fn fresh(user: string) -> Order {
+    let id = "it-" + hex.hex_encode(crypto.random_bytes(8));
+    match (new_order(id, user, [OrderItem { product_id: 1, name: "TR-808", price_cents: 129900, qty: 1 }, OrderItem { product_id: 5, name: "Cable", price_cents: 990, qty: 3 }], 1000)) {
+        Result.Ok(o) => o,
+        Result.Err(e) => panic(e),
+    }
+}
+
+fn outbox_has(order_id: string) -> bool {
+    repo().pending_outbox(1000).unwrap_or([]).filter(fn(e: OutboxEntry) -> bool { e.order_id == order_id }).len() == 1
+}
+
+@test
+fn mysql_stores_an_order_with_its_outbox_atomically() {
+    if (!enabled()) {
+        return;
+    }
+    match (mysql_orders.migrate(repo(), 20)) {
+        Result.Ok(_) => { },
+        Result.Err(e) => panic(e),
+    }
+    let o = fresh("it-user");
+    assert(repo().create(o, "payment.requested", `{"order_id":"x"}`).is_ok());
+    match (repo().find(o.id)) {
+        Result.Ok(found) => match (found) {
+            Option.Some(back) => {
+                assert_eq(back.items.len(), 2);
+                assert_eq(back.total_cents, 129900 + 2970);
+                assert_eq(back.status, PENDING);
+            },
+            Option.None => panic("order not found"),
+        },
+        Result.Err(e) => panic(e),
+    }
+    assert(outbox_has(o.id));
+    // Same id again: the whole transaction rolls back, no second outbox row.
+    assert(repo().create(o, "payment.requested", "{}").is_err());
+    assert(outbox_has(o.id));
+}
+
+@test
+fn mysql_transitions_are_compare_and_set() {
+    if (!enabled()) {
+        return;
+    }
+    let o = fresh("it-user");
+    let _ = repo().create(o, "payment.requested", "{}");
+    assert(repo().transition(o.id, PENDING, PAID, "pi_1", "").unwrap_or(false));
+    assert(!repo().transition(o.id, PENDING, PAID, "pi_1", "").unwrap_or(true));
+}
+
+@test
+fn mysql_outbox_is_delivered_once() {
+    if (!enabled()) {
+        return;
+    }
+    let o = fresh("it-user");
+    let _ = repo().create(o, "payment.requested", "{}");
+    let mine = repo().pending_outbox(1000).unwrap_or([]).filter(fn(e: OutboxEntry) -> bool { e.order_id == o.id });
+    assert_eq(mine.len(), 1);
+    let _ = repo().mark_sent(mine[0].id);
+    assert(!outbox_has(o.id));
+    assert(repo().list_for("it-user").unwrap_or([]).len() >= 3);
+}

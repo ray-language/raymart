@@ -1,0 +1,75 @@
+// The MongoDB adapter against the container (docker-compose.test.yml). Skipped unless RAYMART_IT=1.
+import std/crypto;
+import std/hex;
+from domain/ports import IntentRepository;
+from domain/intent import Intent, new_intent, PROCESSING, SUCCEEDED;
+import adapters/outbound/mongo_intents;
+
+fn enabled() -> bool {
+    env("RAYMART_IT").unwrap_or("") == "1"
+}
+
+fn repo() -> mongo_intents.MongoIntents {
+    mongo_intents.MongoIntents { host: "127.0.0.1", port: 57017, user: "payments", password: "payments", database: "payments" }
+}
+
+fn rand(tag: string) -> string {
+    tag + "-" + hex.hex_encode(crypto.random_bytes(6))
+}
+
+fn make(id: string, order: string) -> Intent {
+    match (new_intent(id, order, "ada", 1990, "USD", "4242", 1)) {
+        Result.Ok(i) => i,
+        Result.Err(e) => panic(e),
+    }
+}
+
+@test
+fn mongo_stores_finds_and_finishes_an_intent() {
+    if (!enabled()) {
+        return;
+    }
+    match (mongo_intents.migrate(repo(), 20)) {
+        Result.Ok(_) => { },
+        Result.Err(e) => panic(e),
+    }
+    let id = rand("pi");
+    let order = rand("o");
+    assert_eq(match (repo().create_if_absent(make(id, order))) { Result.Ok(i) => i.id, Result.Err(_) => "" }, id);
+    match (repo().find(id)) {
+        Result.Ok(found) => match (found) {
+            Option.Some(i) => {
+                assert_eq(i.amount_cents, 1990);
+                assert_eq(i.status, PROCESSING);
+            },
+            Option.None => panic("intent not found"),
+        },
+        Result.Err(e) => panic(e),
+    }
+    assert(repo().finish(id, PROCESSING, SUCCEEDED, "").unwrap_or(false));
+    assert(!repo().finish(id, PROCESSING, SUCCEEDED, "").unwrap_or(true));
+}
+
+@test
+fn mongo_keeps_one_intent_per_order_under_a_race() {
+    if (!enabled()) {
+        return;
+    }
+    let order = rand("race");
+    let ids: Channel<string> = Channel.new();
+    for i in 0..5 {
+        let id = rand("pi${i}");
+        spawn(fn() {
+            send(ids, match (repo().create_if_absent(make(id, order))) { Result.Ok(x) => x.id, Result.Err(_) => "err" });
+        });
+    }
+    var seen: [string] = [];
+    for _ in 0..5 {
+        let got = recv(ids).unwrap_or("none");
+        if (!seen.contains(got)) {
+            seen.push(got);
+        }
+    }
+    assert_eq(seen.len(), 1); // every caller got the same, single intent
+    assert(seen[0] != "err");
+}

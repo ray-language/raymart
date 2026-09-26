@@ -1,0 +1,74 @@
+// The payment domain: a payment intent (one per order) and its lifecycle.
+//
+//   processing ──charge approved──▶ succeeded
+//        └──────charge declined───▶ failed
+import std/json;
+
+pub const PROCESSING: string = "processing";
+pub const SUCCEEDED: string = "succeeded";
+pub const FAILED: string = "failed";
+
+pub struct Intent {
+    id: string,
+    order_id: string,
+    user_id: string,
+    amount_cents: int,
+    currency: string,
+    card_last4: string,
+    status: string,
+    reason: string,
+    created_ms: int,
+}
+
+/// What a card processor answers.
+pub struct Charge {
+    approved: bool,
+    reason: string,
+}
+
+pub fn new_intent(id: string, order_id: string, user_id: string, amount_cents: int, currency: string, card_last4: string, now_ms: int) -> Result<Intent, string> {
+    if (order_id.trim().len() == 0) {
+        return Result.Err("invalid: an intent needs an order id");
+    }
+    if (amount_cents <= 0) {
+        return Result.Err("invalid: the amount must be positive");
+    }
+    if (currency.len() != 3) {
+        return Result.Err("invalid: currency must be an ISO 4217 code");
+    }
+    if (card_last4.len() != 4) {
+        return Result.Err("invalid: card_last4 must be 4 digits");
+    }
+    Result.Ok(Intent { id: id, order_id: order_id, user_id: user_id, amount_cents: amount_cents, currency: currency, card_last4: card_last4, status: PROCESSING, reason: "", created_ms: now_ms })
+}
+
+pub fn is_final(i: Intent) -> bool {
+    i.status == SUCCEEDED || i.status == FAILED
+}
+
+/// The event the orders service consumes once the intent is final.
+pub fn result_kind(i: Intent) -> string {
+    if (i.status == SUCCEEDED) { "payment.succeeded" } else { "payment.failed" }
+}
+
+pub fn result_data(i: Intent) -> json.Json {
+    let m: Map<string, json.Json> = Map.new();
+    m.insert("order_id", json.Json.JStr(i.order_id));
+    m.insert("payment_id", json.Json.JStr(i.id));
+    m.insert("amount_cents", json.Json.JNum(i.amount_cents as float));
+    m.insert("reason", json.Json.JStr(i.reason));
+    json.Json.JObject(m)
+}
+
+pub fn to_json(i: Intent) -> json.Json {
+    let m: Map<string, json.Json> = Map.new();
+    m.insert("id", json.Json.JStr(i.id));
+    m.insert("order_id", json.Json.JStr(i.order_id));
+    m.insert("user_id", json.Json.JStr(i.user_id));
+    m.insert("amount_cents", json.Json.JNum(i.amount_cents as float));
+    m.insert("currency", json.Json.JStr(i.currency));
+    m.insert("card_last4", json.Json.JStr(i.card_last4));
+    m.insert("status", json.Json.JStr(i.status));
+    m.insert("reason", json.Json.JStr(i.reason));
+    json.Json.JObject(m)
+}

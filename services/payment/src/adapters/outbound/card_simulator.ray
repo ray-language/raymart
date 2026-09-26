@@ -1,0 +1,28 @@
+// A deterministic card processor for development: cards are recognised by their last four
+// digits, like the test cards of real payment providers.
+//   0002 → declined · 0003 → insufficient funds · 0004 → processor error (retried) · else approved
+from domain/ports import CardProcessor;
+from domain/intent import Intent, Charge;
+
+pub struct CardSimulator {
+    unused: int,
+}
+
+pub fn new_card_simulator() -> CardSimulator {
+    CardSimulator { unused: 0 }
+}
+
+impl CardProcessor for CardSimulator {
+    fn charge(self, intent: Intent) -> Result<Charge, string> {
+        if (intent.card_last4 == "0002") {
+            return Result.Ok(Charge { approved: false, reason: "card declined" });
+        }
+        if (intent.card_last4 == "0003") {
+            return Result.Ok(Charge { approved: false, reason: "insufficient funds" });
+        }
+        if (intent.card_last4 == "0004") {
+            return Result.Err("unavailable: card processor timeout");
+        }
+        Result.Ok(Charge { approved: true, reason: "" })
+    }
+}

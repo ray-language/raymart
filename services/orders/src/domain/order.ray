@@ -1,0 +1,109 @@
+// The orders domain: an order, its lines, its lifecycle and the payment outcome that moves it.
+//
+//   pending_payment ──payment succeeded──▶ paid
+//          └────────payment failed──────▶ cancelled
+import std/json;
+
+pub const PENDING: string = "pending_payment";
+pub const PAID: string = "paid";
+pub const CANCELLED: string = "cancelled";
+
+pub struct OrderItem {
+    product_id: int,
+    name: string,
+    price_cents: int,
+    qty: int,
+}
+
+pub struct Order {
+    id: string,
+    user_id: string,
+    status: string,
+    items: [OrderItem],
+    total_cents: int,
+    created_ms: int,
+    payment_id: string,
+    reason: string,
+}
+
+/// What the cart holds at checkout (prices are re-read from the catalog on reservation).
+pub struct CartLine {
+    product_id: int,
+    qty: int,
+}
+
+/// The outcome of a payment, as the payment service reports it.
+pub struct PaymentResult {
+    order_id: string,
+    payment_id: string,
+    succeeded: bool,
+    reason: string,
+}
+
+/// A message waiting in the transactional outbox.
+pub struct OutboxEntry {
+    id: int,
+    order_id: string,
+    kind: string,
+    payload: string,
+}
+
+pub fn new_order(id: string, user_id: string, items: [OrderItem], now_ms: int) -> Result<Order, string> {
+    if (items.len() == 0) {
+        return Result.Err("invalid: an order needs at least one item");
+    }
+    let total = items.fold(0, fn(acc: int, it: OrderItem) -> int { acc + it.price_cents * it.qty });
+    Result.Ok(Order { id: id, user_id: user_id, status: PENDING, items: items, total_cents: total, created_ms: now_ms, payment_id: "", reason: "" })
+}
+
+/// The only moves an order can make.
+pub fn can_transition(from: string, to: string) -> bool {
+    from == PENDING && (to == PAID || to == CANCELLED)
+}
+
+/// A card is identified by its last four digits (the only part the system ever sees).
+pub fn valid_card_last4(s: string) -> bool {
+    if (s.len() != 4) {
+        return false;
+    }
+    for c in s.chars() {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn to_json(o: Order) -> json.Json {
+    var items: [json.Json] = [];
+    for it in o.items {
+        let m: Map<string, json.Json> = Map.new();
+        m.insert("product_id", json.Json.JNum(it.product_id as float));
+        m.insert("name", json.Json.JStr(it.name));
+        m.insert("price_cents", json.Json.JNum(it.price_cents as float));
+        m.insert("qty", json.Json.JNum(it.qty as float));
+        items.push(json.Json.JObject(m));
+    }
+    let m: Map<string, json.Json> = Map.new();
+    m.insert("id", json.Json.JStr(o.id));
+    m.insert("user_id", json.Json.JStr(o.user_id));
+    m.insert("status", json.Json.JStr(o.status));
+    m.insert("items", json.Json.JArray(items));
+    m.insert("total_cents", json.Json.JNum(o.total_cents as float));
+    m.insert("created_ms", json.Json.JNum(o.created_ms as float));
+    m.insert("payment_id", json.Json.JStr(o.payment_id));
+    m.insert("reason", json.Json.JStr(o.reason));
+    json.Json.JObject(m)
+}
+
+/// The payment request an order produces (the outbox payload).
+pub fn payment_request(o: Order, card_last4: string, traceparent: string) -> string {
+    let m: Map<string, json.Json> = Map.new();
+    m.insert("order_id", json.Json.JStr(o.id));
+    m.insert("user_id", json.Json.JStr(o.user_id));
+    m.insert("amount_cents", json.Json.JNum(o.total_cents as float));
+    m.insert("currency", json.Json.JStr("USD"));
+    m.insert("card_last4", json.Json.JStr(card_last4));
+    m.insert("traceparent", json.Json.JStr(traceparent));
+    json.stringify(json.Json.JObject(m))
+}

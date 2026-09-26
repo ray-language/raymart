@@ -14,7 +14,7 @@ fn fixture() -> memory.MemoryProducts {
 }
 
 fn stock_of(repo: memory.MemoryProducts, id: int) -> int {
-    get_product(new_catalog(repo), id).map(fn(p: Product) -> int { p.stock }).unwrap_or(-1)
+    match (get_product(new_catalog(repo), id)) { Result.Ok(p) => p.stock, Result.Err(_) => -1 }
 }
 
 fn code(r: Result<[Reserved], string>) -> string {
@@ -28,7 +28,7 @@ fn code(r: Result<[Reserved], string>) -> string {
 fn lists_and_finds_products() {
     let c = new_catalog(fixture());
     assert_eq(list_products(c).unwrap_or([]).len(), 2);
-    assert_eq(get_product(c, 2).map(fn(p: Product) -> string { p.sku }).unwrap_or(""), "TB-303");
+    assert_eq(match (get_product(c, 2)) { Result.Ok(p) => p.sku, Result.Err(_) => "" }, "TB-303");
     match (get_product(c, 9)) {
         Result.Err(e) => assert(e.starts_with("not_found")),
         Result.Ok(_) => panic("found a missing product"),

@@ -1,0 +1,99 @@
+// The orders service's two background loops (driving adapters, like HTTP):
+//
+//   relay     — delivers the transactional outbox to the payment service every tick
+//   results   — consumes `payment.results` from rayq and applies each outcome; ack on
+//               success, nack on failure (rayq retries with backoff, then dead-letters)
+import rpc/rpc;
+import std/json;
+import std/time;
+import common/queue;
+import common/events;
+import common/logs;
+import common/tracing;
+from domain/ports import OrderRepository, CartGateway, Inventory, Payments;
+from domain/order import PaymentResult;
+from application/orders import Orders, relay_outbox, apply_payment_result;
+
+pub const RESULTS_QUEUE: string = "payment.results";
+
+pub fn relay_forever<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(orders: Orders<R, C, I, P>, tick_ms: int) {
+    while (true) {
+        match (relay_outbox(orders, 20)) {
+            Result.Ok(n) => {
+                if (n > 0) {
+                    logs.info("orders", "", "outbox relayed", [("messages", to_string(n))]);
+                }
+            },
+            Result.Err(e) => logs.warn("orders", "", "outbox relay failed, will retry", [("error", e)]),
+        }
+        time.sleep(tick_ms);
+    }
+}
+
+/// Decodes a `payment.succeeded` / `payment.failed` event.
+pub fn result_of(e: events.Event) -> Result<PaymentResult, string> {
+    let order_id = match (json.get_string(e.data, "order_id")) {
+        Option.Some(o) => o,
+        Option.None => return Result.Err("invalid: payment result without order_id"),
+    };
+    if (e.kind != "payment.succeeded" && e.kind != "payment.failed") {
+        return Result.Err("invalid: unexpected event ${e.kind}");
+    }
+    Result.Ok(PaymentResult {
+        order_id: order_id,
+        payment_id: json.get_string(e.data, "payment_id").unwrap_or(""),
+        succeeded: e.kind == "payment.succeeded",
+        reason: json.get_string(e.data, "reason").unwrap_or(""),
+    })
+}
+
+/// Handles one queued message; returns whether to ack it (false = nack, retry later).
+pub fn handle_message<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(orders: Orders<R, C, I, P>, body: string) -> bool {
+    let e = match (events.decode(body)) {
+        Result.Ok(e) => e,
+        Result.Err(err) => {
+            logs.error("orders", "", "unreadable payment result, dropped", [("error", err)]);
+            return true; // retrying cannot make it readable
+        },
+    };
+    let tid = tracing.trace_id(e.traceparent);
+    let r = match (result_of(e)) {
+        Result.Ok(r) => r,
+        Result.Err(err) => {
+            logs.error("orders", tid, "bad payment result, dropped", [("error", err)]);
+            return true;
+        },
+    };
+    match (apply_payment_result(orders, r, e.traceparent)) {
+        Result.Ok(outcome) => {
+            logs.info("orders", tid, "payment result applied", [("order_id", r.order_id), ("outcome", outcome)]);
+            true
+        },
+        Result.Err(err) => {
+            logs.warn("orders", tid, "payment result failed, will retry", [("order_id", r.order_id), ("error", err)]);
+            false
+        },
+    }
+}
+
+pub fn consume_forever<R: OrderRepository, C: CartGateway, I: Inventory, P: Payments>(orders: Orders<R, C, I, P>, q: rpc.Pool, idle_ms: int) {
+    while (true) {
+        // (Nested match: the exhaustiveness check does not combine Ok(Some)/Ok(None) arms.)
+        match (queue.pull(q, RESULTS_QUEUE)) {
+            Result.Ok(next) => match (next) {
+                Option.Some(m) => {
+                    if (handle_message(orders, m.body)) {
+                        let _ = queue.ack(q, RESULTS_QUEUE, m.id);
+                    } else {
+                        let _ = queue.nack(q, RESULTS_QUEUE, m.id);
+                    }
+                },
+                Option.None => time.sleep(idle_ms),
+            },
+            Result.Err(e) => {
+                logs.warn("orders", "", "rayq unavailable", [("error", e)]);
+                time.sleep(idle_ms * 4);
+            },
+        }
+    }
+}

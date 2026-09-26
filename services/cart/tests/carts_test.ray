@@ -24,7 +24,7 @@ fn err_code(r: Result<Cart, string>) -> string {
 }
 
 fn items(r: Result<Cart, string>) -> int {
-    r.map(fn(c: Cart) -> int { c.items.len() }).unwrap_or(-1)
+    match (r) { Result.Ok(c) => c.items.len(), Result.Err(_) => -1 }
 }
 
 @test
@@ -60,7 +60,7 @@ fn quantities_can_be_set_and_lines_removed() {
     let c = carts();
     let _ = add_item(c, "ada", 5, 1, "");
     let _ = add_item(c, "ada", 1, 1, "");
-    assert_eq(set_item_qty(c, "ada", 5, 7, "").map(fn(x: Cart) -> int { total_cents(x) }).unwrap_or(0), 7 * 990 + 129900);
+    assert_eq(match (set_item_qty(c, "ada", 5, 7, "")) { Result.Ok(x) => total_cents(x), Result.Err(_) => 0 }, 7 * 990 + 129900);
     assert_eq(items(set_item_qty(c, "ada", 5, 0, "")), 1);
     assert_eq(items(remove_item(c, "ada", 1)), 0);
     let _ = add_item(c, "ada", 5, 1, "");

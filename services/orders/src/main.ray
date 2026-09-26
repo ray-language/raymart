@@ -1,0 +1,64 @@
+// orders — orders and the checkout saga. Composition root: MySQL behind OrderRepository, the
+// cart and products rpc APIs behind CartGateway and Inventory, the payment gRPC API behind
+// Payments. Inbound: HTTP (public API), the outbox relay and the payment-results consumer.
+//
+//   orders            serve (HTTP on HTTP_PORT, plus the two background loops)
+//   orders health     exit 0 if this container's HTTP answers /health
+import web/framework as web;
+import rpc/rpc;
+import net/http;
+import common/config;
+import common/logs;
+from application/orders import new_orders;
+import adapters/outbound/mysql_orders;
+import adapters/outbound/services_rpc;
+import adapters/outbound/payments_grpc;
+import adapters/inbound/http as http_in;
+import adapters/inbound/workers;
+
+fn health(port: int) -> int {
+    match (http.fetch("http://127.0.0.1:${port}/health")) {
+        Result.Ok(r) => if (r.status == 200) { 0 } else { 1 },
+        Result.Err(_) => 1,
+    }
+}
+
+fn main() -> int {
+    let http_port = config.get_int("HTTP_PORT", 8080);
+    let av = args();
+    if (av.len() > 0 && av[0] == "health") {
+        return health(http_port);
+    }
+    let secret = config.required("JWT_SECRET");
+    let repo = mysql_orders.MysqlOrders {
+        host: config.get("MYSQL_HOST", "127.0.0.1"),
+        port: config.get_int("MYSQL_PORT", 3306),
+        user: config.get("MYSQL_USER", "orders"),
+        password: config.get("MYSQL_PASSWORD", "orders"),
+        database: config.get("MYSQL_DATABASE", "orders"),
+    };
+    match (mysql_orders.migrate(repo, 60)) {
+        Result.Ok(_) => logs.info("orders", "", "database ready", []),
+        Result.Err(e) => {
+            logs.error("orders", "", "database unavailable", [("error", e)]);
+            return 1;
+        },
+    }
+    let deadline = config.get_int("RPC_DEADLINE_MS", 3000);
+    let cart = services_rpc.new_cart_rpc(config.get("CART_HOST", "127.0.0.1"), config.get_int("CART_RPC_PORT", 9000), deadline);
+    let inventory = services_rpc.new_products_rpc(config.get("PRODUCTS_HOST", "127.0.0.1"), config.get_int("PRODUCTS_RPC_PORT", 9000), deadline);
+    let payments = payments_grpc.PaymentsGrpc { host: config.get("PAYMENT_HOST", "127.0.0.1"), port: config.get_int("PAYMENT_GRPC_PORT", 9100), deadline_ms: deadline };
+    let orders = new_orders(repo, cart, inventory, payments);
+    let queue = rpc.pool(config.get("RAYQ_HOST", "127.0.0.1"), config.get_int("RAYQ_PORT", 7450), 2);
+
+    let _relay = spawn(fn() { workers.relay_forever(orders, config.get_int("OUTBOX_TICK_MS", 500)); });
+    let _results = spawn(fn() { workers.consume_forever(orders, queue, 300); });
+    logs.info("orders", "", "serving", [("http", to_string(http_port))]);
+    match (web.listen_graceful(fn() -> web.App { http_in.build(orders, secret) }, "0.0.0.0", http_port, 3000)) {
+        Result.Ok(_) => 0,
+        Result.Err(e) => {
+            logs.error("orders", "", "http server stopped", [("error", e)]);
+            1
+        },
+    }
+}
