@@ -1,0 +1,24 @@
+// W3C trace context across hops. The gateway starts (or adopts) a trace; each service
+// continues it and hands a CHILD span to the next hop (rpc, gRPC or a queued message).
+import net/trace;
+
+/// The trace of an incoming request: adopted from its `traceparent` header, or new.
+pub fn from_header(traceparent: string) -> trace.Trace {
+    match (trace.parse_traceparent(traceparent)) {
+        Option.Some(t) => t,
+        Option.None => trace.new_trace(),
+    }
+}
+
+/// The trace id (32 hex) of a `traceparent`, or "" when it is not one.
+pub fn trace_id(traceparent: string) -> string {
+    match (trace.parse_traceparent(traceparent)) {
+        Option.Some(t) => t.trace_id,
+        Option.None => "",
+    }
+}
+
+/// The `traceparent` to send to the next hop: a child span of `traceparent`.
+pub fn child_of(traceparent: string) -> string {
+    trace.traceparent(trace.child(from_header(traceparent)))
+}

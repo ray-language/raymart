@@ -1,0 +1,47 @@
+// The envelope of every message on the queues:
+//   {"type": "payment.requested", "id": "<uuid>", "traceparent": "...", "data": {...}}
+// `id` is the idempotency key: a consumer that sees the same id twice does the work once.
+import std/json;
+import std/uuid;
+
+pub struct Event {
+    kind: string,
+    id: string,
+    traceparent: string,
+    data: json.Json,
+}
+
+pub fn new_event(kind: string, traceparent: string, data: json.Json) -> Event {
+    Event { kind: kind, id: uuid.uuid_v7(), traceparent: traceparent, data: data }
+}
+
+pub fn encode(e: Event) -> string {
+    let m: Map<string, json.Json> = Map.new();
+    m.insert("type", json.Json.JStr(e.kind));
+    m.insert("id", json.Json.JStr(e.id));
+    m.insert("traceparent", json.Json.JStr(e.traceparent));
+    m.insert("data", e.data);
+    json.stringify(json.Json.JObject(m))
+}
+
+pub fn decode(text: string) -> Result<Event, string> {
+    let j = json.parse(text)?;
+    let kind = match (json.get_string(j, "type")) {
+        Option.Some(k) => k,
+        Option.None => return Result.Err("event without type"),
+    };
+    let id = match (json.get_string(j, "id")) {
+        Option.Some(i) => i,
+        Option.None => return Result.Err("event without id"),
+    };
+    let data = match (json.member(j, "data")) {
+        Option.Some(d) => d,
+        Option.None => json.Json.JNull,
+    };
+    Result.Ok(Event {
+        kind: kind,
+        id: id,
+        traceparent: json.get_string(j, "traceparent").unwrap_or(""),
+        data: data,
+    })
+}

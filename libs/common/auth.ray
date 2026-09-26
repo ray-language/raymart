@@ -1,0 +1,29 @@
+// Identity. raygate validates the Bearer JWT (signature, exp, nbf) before a request
+// reaches a service; the service still verifies it — defence in depth, and the only way
+// to trust the `sub` claim — and uses `sub` as the user id.
+import net/jwt;
+import std/json;
+import std/time;
+
+/// The user id (`sub`) of a verified Bearer token, or Err when there is none or it fails.
+pub fn user_of(authorization: string, secret: string) -> Result<string, string> {
+    if (!authorization.starts_with("Bearer ")) {
+        return Result.Err("missing bearer token");
+    }
+    let token = authorization.substring(7, authorization.len()).trim();
+    let claims = jwt.jwt_verify_claims(secret.to_bytes(), token, time.now())?;
+    let parsed = json.parse(claims)?;
+    match (json.get_string(parsed, "sub")) {
+        Option.Some(sub) => {
+            if (sub.len() == 0) { Result.Err("empty subject") } else { Result.Ok(sub) }
+        },
+        Option.None => Result.Err("token without subject"),
+    }
+}
+
+/// A signed HS256 token for `user`, valid for `ttl_s` seconds (development tooling, tests).
+pub fn token_for(user: string, secret: string, ttl_s: int) -> string {
+    let now_s = time.now() / 1000;
+    let payload = json.render(json.obj().field("sub", user).field("iat", now_s).field("exp", now_s + ttl_s));
+    jwt.jwt_sign(secret.to_bytes(), payload)
+}

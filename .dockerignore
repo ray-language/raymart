@@ -1,0 +1,5 @@
+.git
+**/.ray-deps
+**/bin
+**/*.db
+**/*.kv

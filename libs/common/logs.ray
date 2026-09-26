@@ -1,0 +1,24 @@
+// Structured JSON logs (net/log), one line per event, stamped with the service and — when
+// the request carries one — the W3C trace id, so `raylogs` can follow a request across
+// services.
+import net/log;
+
+pub fn info(service: string, trace_id: string, msg: string, fields: [(string, string)]) {
+    emit(log.info(log.with_trace(log.logger(service), trace_id), msg), fields);
+}
+
+pub fn warn(service: string, trace_id: string, msg: string, fields: [(string, string)]) {
+    emit(log.warn(log.with_trace(log.logger(service), trace_id), msg), fields);
+}
+
+pub fn error(service: string, trace_id: string, msg: string, fields: [(string, string)]) {
+    emit(log.error(log.with_trace(log.logger(service), trace_id), msg), fields);
+}
+
+fn emit(e: log.LogEntry, fields: [(string, string)]) {
+    var entry = e;
+    for f in fields {
+        entry = log.field(entry, f.0, f.1);
+    }
+    log.emit(entry);
+}

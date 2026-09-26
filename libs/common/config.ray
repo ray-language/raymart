@@ -1,0 +1,27 @@
+// Twelve-factor configuration: every service reads its settings from the environment,
+// with a default for local runs. docker-compose.yml is the place that sets them.
+
+/// The value of an environment variable, or `fallback` when unset or empty.
+pub fn get(name: string, fallback: string) -> string {
+    match (env(name)) {
+        Option.Some(v) => {
+            if (v.trim().len() == 0) { fallback } else { v.trim() }
+        },
+        Option.None => fallback,
+    }
+}
+
+/// An integer environment variable, or `fallback` when unset, empty or not a number.
+pub fn get_int(name: string, fallback: int) -> int {
+    parse_int(get(name, "")).unwrap_or(fallback)
+}
+
+/// A required environment variable: panics with a clear message when missing, so a
+/// misconfigured container fails at start instead of at its first request.
+pub fn required(name: string) -> string {
+    let v = get(name, "");
+    if (v.len() == 0) {
+        panic("missing required environment variable ${name}");
+    }
+    v
+}
