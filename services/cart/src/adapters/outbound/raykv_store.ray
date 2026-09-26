@@ -1,0 +1,54 @@
+// CartStore on raykv (the RESP key-value server of ray-apps; plain Redis works too): each cart
+// is one JSON value under `cart:<user>`, written with an expiry so abandoned carts go away on
+// their own. One connection per operation — never shared between request fibers.
+import net/redis;
+import std/json;
+from domain/ports import CartStore;
+from domain/cart import Cart, empty, to_json, from_json;
+
+pub struct RaykvCarts {
+    host: string,
+    port: int,
+    ttl_s: int,
+}
+
+fn key(user: string) -> string {
+    "cart:" + user
+}
+
+fn with_conn(s: RaykvCarts, args: [string]) -> Result<redis.Reply, string> {
+    let c = match (redis.connect(s.host, s.port)) {
+        Result.Ok(c) => c,
+        Result.Err(e) => return Result.Err("unavailable: cart store: " + e),
+    };
+    let r = redis.command(c, args);
+    redis.close_conn(c);
+    match (r) {
+        Result.Ok(redis.Reply.Err(e)) => Result.Err("unavailable: cart store: " + e),
+        other => other,
+    }
+}
+
+impl CartStore for RaykvCarts {
+    fn load(self, user_id: string) -> Result<Cart, string> {
+        match (with_conn(self, ["GET", key(user_id)])?) {
+            redis.Reply.Str(text) => from_json(json.parse(text)?),
+            _ => Result.Ok(empty(user_id)),
+        }
+    }
+
+    fn save(self, cart: Cart) -> Result<int, string> {
+        if (cart.items.len() == 0) {
+            return self.clear(cart.user_id);
+        }
+        let _ = with_conn(self, ["SET", key(cart.user_id), json.stringify(to_json(cart)), "EX", to_string(self.ttl_s)])?;
+        Result.Ok(cart.items.len())
+    }
+
+    fn clear(self, user_id: string) -> Result<int, string> {
+        match (with_conn(self, ["DEL", key(user_id)])?) {
+            redis.Reply.Int(n) => Result.Ok(n),
+            _ => Result.Ok(0),
+        }
+    }
+}

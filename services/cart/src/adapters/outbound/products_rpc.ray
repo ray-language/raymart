@@ -1,0 +1,40 @@
+// ProductCatalog over the products service's rpc API (products.get), with a deadline and the
+// caller's trace continued as a child span.
+import rpc/rpc;
+import std/json;
+import common/tracing;
+from domain/ports import ProductCatalog;
+from domain/cart import ProductInfo;
+
+pub struct ProductsRpc {
+    pool: rpc.Pool,
+    deadline_ms: int,
+}
+
+pub fn new_products_rpc(host: string, port: int, deadline_ms: int) -> ProductsRpc {
+    ProductsRpc { pool: rpc.pool(host, port, 8), deadline_ms: deadline_ms }
+}
+
+impl ProductCatalog for ProductsRpc {
+    fn product(self, id: int, traceparent: string) -> Result<ProductInfo, string> {
+        let m: Map<string, json.Json> = Map.new();
+        m.insert("id", json.Json.JNum(id as float));
+        let r = rpc.pool_call_full(self.pool, "products.get", json.Json.JObject(m), self.deadline_ms, tracing.child_of(traceparent));
+        match (r) {
+            Result.Ok(j) => Result.Ok(ProductInfo {
+                id: json.get_int(j, "id").unwrap_or(id),
+                name: json.get_string(j, "name").unwrap_or(""),
+                price_cents: json.get_int(j, "price_cents").unwrap_or(0),
+                stock: json.get_int(j, "stock").unwrap_or(0),
+            }),
+            Result.Err(e) => {
+                // Domain errors come back as "<code>: …"; anything else is the catalog failing.
+                if (e.starts_with("not_found:") || e.starts_with("invalid:")) {
+                    Result.Err(e)
+                } else {
+                    Result.Err("unavailable: products: " + e)
+                }
+            },
+        }
+    }
+}

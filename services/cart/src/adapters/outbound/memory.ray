@@ -1,0 +1,51 @@
+// In-memory adapters for the tests: a CartStore and a fixed ProductCatalog.
+from domain/ports import CartStore, ProductCatalog;
+from domain/cart import Cart, ProductInfo, empty;
+
+pub struct MemoryCarts {
+    carts: Map<string, Cart>,
+}
+
+pub fn new_memory_carts() -> MemoryCarts {
+    let m: Map<string, Cart> = Map.new();
+    MemoryCarts { carts: m }
+}
+
+impl CartStore for MemoryCarts {
+    fn load(self, user_id: string) -> Result<Cart, string> {
+        Result.Ok(self.carts.get(user_id).unwrap_or(empty(user_id)))
+    }
+
+    fn save(self, cart: Cart) -> Result<int, string> {
+        self.carts.insert(cart.user_id, cart);
+        Result.Ok(cart.items.len())
+    }
+
+    fn clear(self, user_id: string) -> Result<int, string> {
+        let had = self.carts.contains_key(user_id);
+        self.carts.remove(user_id);
+        Result.Ok(if (had) { 1 } else { 0 })
+    }
+}
+
+pub struct FixedCatalog {
+    products: [ProductInfo],
+    // The traceparents the catalog was called with (the tests check propagation).
+    seen: [string],
+}
+
+pub fn new_fixed_catalog(products: [ProductInfo]) -> FixedCatalog {
+    FixedCatalog { products: products, seen: [] }
+}
+
+impl ProductCatalog for FixedCatalog {
+    fn product(self, id: int, traceparent: string) -> Result<ProductInfo, string> {
+        self.seen.push(traceparent);
+        for p in self.products {
+            if (p.id == id) {
+                return Result.Ok(p);
+            }
+        }
+        Result.Err("not_found: no product ${id}")
+    }
+}

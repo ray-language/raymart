@@ -1,0 +1,92 @@
+// The cart's HTTP face, behind raygate. Every route needs a Bearer JWT; its `sub` is the user.
+//   GET    /api/cart                    the cart
+//   POST   /api/cart/items              {product_id, qty}  add units
+//   PUT    /api/cart/items/:product_id  {qty}              set the quantity (0 removes)
+//   DELETE /api/cart/items/:product_id                     remove the line
+//   DELETE /api/cart                                       empty the cart
+//   GET    /health
+import web/framework as web;
+import std/json;
+import common/auth;
+import common/httpx;
+import common/logs;
+import common/tracing;
+from domain/ports import CartStore, ProductCatalog;
+from domain/cart import Cart, to_json;
+from application/carts import Carts, view, add_item, set_item_qty, remove_item, clear_cart;
+
+fn reply(ctx: web.Ctx, res: web.Res, r: Result<Cart, string>) {
+    match (r) {
+        Result.Ok(c) => httpx.ok(res, json.stringify(to_json(c))),
+        Result.Err(e) => {
+            logs.warn("cart", tracing.trace_id(web.header_of(ctx, "traceparent")), "request failed", [("path", ctx.path), ("error", e)]);
+            httpx.fail(res, e);
+        },
+    }
+}
+
+fn body_int(ctx: web.Ctx, key: string) -> Option<int> {
+    match (web.json_body(ctx)) {
+        Result.Ok(j) => json.get_int(j, key),
+        Result.Err(_) => Option.None,
+    }
+}
+
+// Both values, or None (match has no tuple patterns).
+fn both(a: Option<int>, b: Option<int>) -> Option<(int, int)> {
+    match (a) {
+        Option.Some(x) => match (b) {
+            Option.Some(y) => Option.Some((x, y)),
+            Option.None => Option.None,
+        },
+        Option.None => Option.None,
+    }
+}
+
+pub fn build<S: CartStore, P: ProductCatalog>(carts: Carts<S, P>, jwt_secret: string) -> web.App {
+    let app = web.new_app();
+    web.GET(app, "/health", fn(ctx: web.Ctx, res: web.Res) {
+        httpx.ok(res, `{"status":"ok","service":"cart"}`);
+    });
+    // Identity for everything under /api/cart.
+    web.use_on(app, "/api/cart", fn(ctx: web.Ctx, res: web.Res) -> web.Step {
+        match (auth.user_of(web.header_of(ctx, "authorization"), jwt_secret)) {
+            Result.Ok(user) => {
+                web.put_local(ctx, "user", user);
+                web.Step.Next
+            },
+            Result.Err(e) => {
+                httpx.error(res, 401, "unauthorized", e);
+                web.Step.Done
+            },
+        }
+    });
+    web.GET(app, "/api/cart", fn(ctx: web.Ctx, res: web.Res) {
+        reply(ctx, res, view(carts, web.local(ctx, "user")));
+    });
+    web.POST(app, "/api/cart/items", fn(ctx: web.Ctx, res: web.Res) {
+        match (both(body_int(ctx, "product_id"), body_int(ctx, "qty"))) {
+            Option.Some(pq) => reply(ctx, res, add_item(carts, web.local(ctx, "user"), pq.0, pq.1, web.header_of(ctx, "traceparent"))),
+            Option.None => httpx.error(res, 400, "invalid", "body must be {\"product_id\": int, \"qty\": int}"),
+        }
+    });
+    web.PUT(app, "/api/cart/items/:product_id", fn(ctx: web.Ctx, res: web.Res) {
+        match (both(parse_int(web.param(ctx, "product_id")), body_int(ctx, "qty"))) {
+            Option.Some(pq) => reply(ctx, res, set_item_qty(carts, web.local(ctx, "user"), pq.0, pq.1, web.header_of(ctx, "traceparent"))),
+            Option.None => httpx.error(res, 400, "invalid", "path needs a product id and body {\"qty\": int}"),
+        }
+    });
+    web.DELETE(app, "/api/cart/items/:product_id", fn(ctx: web.Ctx, res: web.Res) {
+        match (parse_int(web.param(ctx, "product_id"))) {
+            Option.Some(pid) => reply(ctx, res, remove_item(carts, web.local(ctx, "user"), pid)),
+            Option.None => httpx.error(res, 400, "invalid", "product id must be a number"),
+        }
+    });
+    web.DELETE(app, "/api/cart", fn(ctx: web.Ctx, res: web.Res) {
+        match (clear_cart(carts, web.local(ctx, "user"))) {
+            Result.Ok(_) => httpx.ok(res, `{"cleared":true}`),
+            Result.Err(e) => httpx.fail(res, e),
+        }
+    });
+    app
+}

@@ -1,0 +1,47 @@
+// The raykv adapter against the container (docker-compose.test.yml). Skipped unless RAYMART_IT=1.
+import std/time;
+import std/crypto;
+import std/hex;
+from domain/ports import CartStore;
+from domain/cart import Cart, Item;
+import adapters/outbound/raykv_store;
+
+fn enabled() -> bool {
+    env("RAYMART_IT").unwrap_or("") == "1"
+}
+
+fn user() -> string {
+    "it-" + hex.hex_encode(crypto.random_bytes(6))
+}
+
+@test
+fn raykv_saves_loads_and_clears_a_cart() {
+    if (!enabled()) {
+        return;
+    }
+    let s = raykv_store.RaykvCarts { host: "127.0.0.1", port: 57379, ttl_s: 60 };
+    let u = user();
+    let cart = Cart { user_id: u, items: [Item { product_id: 5, name: "Cable", price_cents: 990, qty: 3 }] };
+    assert_eq(s.save(cart).unwrap_or(-1), 1);
+    match (s.load(u)) {
+        Result.Ok(c) => {
+            assert_eq(c.items.len(), 1);
+            assert_eq(c.items[0].qty, 3);
+        },
+        Result.Err(e) => panic(e),
+    }
+    assert_eq(s.clear(u).unwrap_or(-1), 1);
+    assert_eq(s.load(u).map(fn(c: Cart) -> int { c.items.len() }).unwrap_or(-1), 0);
+}
+
+@test
+fn raykv_carts_expire() {
+    if (!enabled()) {
+        return;
+    }
+    let s = raykv_store.RaykvCarts { host: "127.0.0.1", port: 57379, ttl_s: 1 };
+    let u = user();
+    let _ = s.save(Cart { user_id: u, items: [Item { product_id: 5, name: "Cable", price_cents: 990, qty: 1 }] });
+    time.sleep(2100);
+    assert_eq(s.load(u).map(fn(c: Cart) -> int { c.items.len() }).unwrap_or(-1), 0);
+}

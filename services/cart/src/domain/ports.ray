@@ -1,0 +1,15 @@
+// The cart's outbound ports: where carts live, and what the catalog says about a product.
+from domain/cart import Cart, ProductInfo;
+
+pub trait CartStore {
+    /// The user's cart (an empty one when there is none or it expired).
+    fn load(self, user_id: string) -> Result<Cart, string>;
+    fn save(self, cart: Cart) -> Result<int, string>;
+    fn clear(self, user_id: string) -> Result<int, string>;
+}
+
+pub trait ProductCatalog {
+    /// The product, or an Err "not_found: …" / "unavailable: …". `traceparent` continues the
+    /// caller's trace into the catalog.
+    fn product(self, id: int, traceparent: string) -> Result<ProductInfo, string>;
+}
