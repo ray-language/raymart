@@ -158,9 +158,42 @@ services:
       interval: 3s
       retries: 30
 
+  # ---- edge ----
+  raygate:
+    build:
+      <<: *raylang-build
+      args: { APP_REPO: "https://github.com/ray-language/raygate.git", APP_REF: "e94c0ce" }
+    command: ["--config", "/etc/raygate/raygate.toml"]
+    volumes: [./config/raygate.toml:/etc/raygate/raygate.toml:ro]
+    ports: ["127.0.0.1:8088:8080"]
+    depends_on:
+      products: { condition: service_healthy }
+      cart: { condition: service_healthy }
+      orders: { condition: service_healthy }
+      payment: { condition: service_healthy }
+
+  raywatch:
+    build:
+      <<: *raylang-build
+      args: { APP_REPO: "https://github.com/ray-language/raywatch.git", APP_REF: "a20a47c" }
+    command: ["--config", "/etc/raywatch/raywatch.toml"]
+    volumes:
+      - ./config/raywatch.toml:/etc/raywatch/raywatch.toml:ro
+      - raywatch-data:/data
+    ports: ["127.0.0.1:8091:8091"]
+    depends_on: [raygate]
+
+  # ---- tools (not started by `up`; `docker compose run --rm raylogs …`) ----
+  raylogs:
+    profiles: ["tools"]
+    build:
+      <<: *raylang-build
+      args: { APP_REPO: "https://github.com/ray-language/raylogs.git", APP_REF: "1002c71" }
+
 volumes:
   postgres-data:
   mysql-data:
   mongo-data:
   raykv-data:
   rayq-data:
+  raywatch-data:

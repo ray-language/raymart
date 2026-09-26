@@ -1,0 +1,88 @@
+# raywatch: the health of every raymart piece, live on http://127.0.0.1:8091/.
+
+[server]
+bind = "0.0.0.0"
+port = 8091
+db = "/data/raywatch.db"
+
+[[check]]
+name = "gateway"
+type = "http"
+target = "http://raygate:8080/health"
+interval_ms = 5000
+timeout_ms = 2000
+expect_status = 200
+
+[[check]]
+name = "products"
+type = "http"
+target = "http://products:8080/health"
+interval_ms = 5000
+timeout_ms = 2000
+expect_status = 200
+
+[[check]]
+name = "cart"
+type = "http"
+target = "http://cart:8080/health"
+interval_ms = 5000
+timeout_ms = 2000
+expect_status = 200
+
+[[check]]
+name = "orders"
+type = "http"
+target = "http://orders:8080/health"
+interval_ms = 5000
+timeout_ms = 2000
+expect_status = 200
+
+[[check]]
+name = "payment"
+type = "http"
+target = "http://payment:8080/health"
+interval_ms = 5000
+timeout_ms = 2000
+expect_status = 200
+
+[[check]]
+name = "payment-grpc"
+type = "tcp"
+target = "payment:9100"
+interval_ms = 5000
+timeout_ms = 2000
+
+[[check]]
+name = "rayq"
+type = "tcp"
+target = "rayq:7450"
+interval_ms = 5000
+timeout_ms = 2000
+
+[[check]]
+name = "raykv"
+type = "redis"
+target = "raykv:7379"
+interval_ms = 5000
+timeout_ms = 2000
+
+[[check]]
+name = "postgres"
+type = "tcp"
+target = "postgres:5432"
+interval_ms = 10000
+timeout_ms = 2000
+
+[[check]]
+name = "mysql"
+type = "tcp"
+target = "mysql:3306"
+interval_ms = 10000
+timeout_ms = 2000
+
+[[check]]
+name = "mongo"
+type = "tcp"
+target = "mongo:27017"
+interval_ms = 10000
+timeout_ms = 2000
