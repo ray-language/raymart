@@ -4,7 +4,7 @@ COMPOSE := docker compose
 RAY_PROJECTS := libs/common $(wildcard services/*) $(wildcard libs/grpc) $(wildcard tools/*)
 
 .DEFAULT_GOAL := help
-.PHONY: help up down build ps logs test test-it check-release e2e token chaos trace log-stats
+.PHONY: help up down build ps logs test test-it check-release e2e token chaos trace log-stats bench bench-quick
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
@@ -58,3 +58,9 @@ trace: ## Follow one request across every service: make trace ID=<32-hex trace i
 log-stats: ## Log lines per service and level (raylogs)
 	@$(COMPOSE) logs --no-log-prefix products cart orders payment 2>/dev/null | grep '^{' \
 		| $(COMPOSE) --profile tools run --rm -T raylogs --json --count-by service
+
+bench: ## Load test: a ramp of 1→8→32→64 VUs × 15 s per scenario, invariants, report in perf/results/
+	@scripts/bench.sh $(ARGS)
+
+bench-quick: ## A short bench (1 and 16 VUs × 5 s) to check that everything works
+	@scripts/bench.sh --stages 1,16 --duration 5 --drain-stock 100

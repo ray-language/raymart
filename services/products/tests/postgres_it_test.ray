@@ -12,7 +12,13 @@ fn enabled() -> bool {
 }
 
 fn repo() -> postgres.PostgresProducts {
-    postgres.PostgresProducts { host: "127.0.0.1", port: 55432, user: "products", password: "products", database: "products" }
+    postgres.PostgresProducts {
+        host: "127.0.0.1",
+        port: 55432,
+        user: "products",
+        password: "products",
+        database: "products"
+    }
 }
 
 fn stock(id: int) -> int {
@@ -23,11 +29,22 @@ fn stock(id: int) -> int {
 }
 
 fn set_stock(id: int, n: int) {
-    let c = match (pg.connect("127.0.0.1", 55432, "products", "products", "products", hex.hex_encode(crypto.random_bytes(12)))) {
+    let c = match (pg.connect(
+        "127.0.0.1",
+        55432,
+        "products",
+        "products",
+        "products",
+        hex.hex_encode(crypto.random_bytes(12))
+    )) {
         Result.Ok(c) => c,
         Result.Err(e) => panic(e),
     };
-    let _ = pg.exec(c, "UPDATE products SET stock = $1 WHERE id = $2", [to_string(n), to_string(id)]);
+    let _ = pg.exec(
+        c,
+        "UPDATE products SET stock = $1 WHERE id = $2",
+        [to_string(n), to_string(id)]
+    );
     pg.disconnect(c);
 }
 
@@ -49,7 +66,7 @@ fn postgres_reserves_commits_and_releases() {
     let r = repo().reserve(o, [Line { product_id: 2, qty: 3 }]);
     assert(r.is_ok());
     assert_eq(stock(2), 7);
-    assert_eq(repo().reserve(o, [Line { product_id: 2, qty: 3 }]).unwrap_or([]).len(), 1); // idempotent
+    assert_eq(repo().reserve(o, [Line { product_id: 2, qty: 3 }]).unwrap_or([]).len(), 1);  // idempotent
     assert_eq(stock(2), 7);
     assert_eq(repo().release(o).unwrap_or(-1), 1);
     assert_eq(stock(2), 10);
@@ -69,7 +86,10 @@ fn postgres_all_or_nothing_rolls_back() {
     }
     set_stock(2, 5);
     set_stock(4, 1);
-    let r = repo().reserve(order_id("aon"), [Line { product_id: 2, qty: 2 }, Line { product_id: 4, qty: 2 }]);
+    let r = repo().reserve(
+        order_id("aon"),
+        [Line { product_id: 2, qty: 2 }, Line { product_id: 4, qty: 2 }]
+    );
     assert(r.is_err());
     assert_eq(stock(2), 5);
     assert_eq(stock(4), 1);
@@ -96,4 +116,27 @@ fn postgres_the_last_unit_goes_to_one_order() {
     }
     assert_eq(won, 1);
     assert_eq(stock(4), 0);
+}
+
+@test
+fn postgres_restocks() {
+    if (!enabled()) {
+        return;
+    }
+    match (postgres.migrate(repo(), 10)) {
+        Result.Ok(_) => { },
+        Result.Err(e) => panic(e),
+    }
+    set_stock(3, 4);
+    match (repo().restock(3, 6)) {
+        Result.Ok(found) => {
+            match (found) {
+                Option.Some(p) => assert_eq(p.stock, 10),
+                Option.None => panic("product 3 missing"),
+            }
+        },
+        Result.Err(e) => panic(e),
+    }
+    assert_eq(stock(3), 10);
+    assert(repo().restock(999999, 1).unwrap_or(Option.None).is_none());
 }

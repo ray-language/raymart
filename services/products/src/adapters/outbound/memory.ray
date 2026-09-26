@@ -45,7 +45,9 @@ impl ProductRepository for MemoryProducts {
             match (index_of(self, l.product_id)) {
                 Option.Some(i) => {
                     if (!has_stock(self.products[i], l.qty)) {
-                        return Result.Err("out_of_stock: product ${l.product_id} has ${self.products[i].stock} left");
+                        return Result.Err(
+                            "out_of_stock: product ${l.product_id} has ${self.products[i].stock} left"
+                        );
                     }
                 },
                 Option.None => return Result.Err("not_found: no product ${l.product_id}"),
@@ -55,8 +57,16 @@ impl ProductRepository for MemoryProducts {
         for l in lines {
             let i = index_of(self, l.product_id).unwrap_or(0);
             let p = self.products[i];
-            self.products[i] = Product { id: p.id, sku: p.sku, name: p.name, price_cents: p.price_cents, stock: p.stock - l.qty };
-            out.push(Reserved { product_id: p.id, name: p.name, price_cents: p.price_cents, qty: l.qty });
+            self.products[i] = Product {
+                id: p.id,
+                sku: p.sku,
+                name: p.name,
+                price_cents: p.price_cents,
+                stock: p.stock - l.qty
+            };
+            out.push(
+                Reserved { product_id: p.id, name: p.name, price_cents: p.price_cents, qty: l.qty }
+            );
         }
         self.reservations.insert(order_id, ("reserved", out));
         Result.Ok(out)
@@ -78,17 +88,41 @@ impl ProductRepository for MemoryProducts {
         match (self.reservations.get(order_id)) {
             Option.Some(r) => {
                 if (r.0 != "reserved") {
-                    return Result.Ok(0); // already released, or final
+                    return Result.Ok(0);  // already released, or final
                 }
                 for line in r.1 {
                     let i = index_of(self, line.product_id).unwrap_or(0);
                     let p = self.products[i];
-                    self.products[i] = Product { id: p.id, sku: p.sku, name: p.name, price_cents: p.price_cents, stock: p.stock + line.qty };
+                    self.products[i] = Product {
+                        id: p.id,
+                        sku: p.sku,
+                        name: p.name,
+                        price_cents: p.price_cents,
+                        stock: p.stock + line.qty
+                    };
                 }
                 self.reservations.insert(order_id, ("released", r.1));
                 Result.Ok(r.1.len())
             },
             Option.None => Result.Ok(0),
+        }
+    }
+
+    fn restock(self, id: int, qty: int) -> Result<Option<Product>, string> {
+        match (index_of(self, id)) {
+            Option.Some(i) => {
+                let p = self.products[i];
+                let after = Product {
+                    id: p.id,
+                    sku: p.sku,
+                    name: p.name,
+                    price_cents: p.price_cents,
+                    stock: p.stock + qty
+                };
+                self.products[i] = after;
+                Result.Ok(Option.Some(after))
+            },
+            Option.None => Result.Ok(Option.None),
         }
     }
 }

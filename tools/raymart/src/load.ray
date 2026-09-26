@@ -1,0 +1,296 @@
+// The load generator's virtual users. A stage starts N of them, each in its own fiber with its
+// own user, token and keep-alive connection, looping over a scenario until the stage's
+// deadline (a closed model: a user sends its next request once the previous one answered).
+// Each VU records into its own Recorder and hands it back through a channel.
+//
+// Scenarios:
+//   browse         GET /api/products and /api/products/:id through raygate
+//   browse-direct  the same, straight to the products service (the gateway's cost = the gap)
+//   cart           add, read and remove a cart line (raykv + an rpc to products)
+//   purchase       add to cart, check out, and poll the order until the saga settles it
+//                  (outbox → gRPC → rayq → worker → rayq → consumer); a share of the cards
+//                  are declined, so the compensation path runs too
+//   drain          every VU buys one unit of the same product until it sells out: the
+//                  concurrency check — exactly the stock is sold, never one more
+import net/http;
+import std/json;
+import std/time;
+import common/auth;
+import stats;
+
+/// How long a VU waits after a 503 or a transport error before its next request.
+pub const BACKOFF_MS: int = 100;
+
+pub struct Target {
+    gateway: string,
+    products_direct: string,
+    secret: string,
+    run_id: string,
+    // purchase / drain
+    product_id: int,
+    declined_every: int,
+    settle_timeout_ms: int,
+    poll_ms: int,
+}
+
+struct Vu {
+    id: int,
+    user: string,
+    conn: http.Conn,
+    headers: Map<string, string>,
+    rec: stats.Recorder,
+    iter: int,
+}
+
+struct Reply {
+    status: int,
+    text: string,
+}
+
+fn now_ns() -> int {
+    time.monotonic_nanos()
+}
+
+fn new_vu(t: Target, scenario: string, id: int, base: string) -> Result<Vu, string> {
+    let user = "bench-" + t.run_id + "-" + scenario + "-" + to_string(id);
+    let h: Map<string, string> = Map.new();
+    h.insert("content-type", "application/json");
+    h.insert("authorization", "Bearer " + auth.token_for(user, t.secret, 3600));
+    let conn = http.connect(base)?;
+    Result.Ok(Vu { id: id, user: user, conn: conn, headers: h, rec: stats.new_recorder(), iter: 0 })
+}
+
+/// One request, timed. A status in `expect` counts as a success of `step`; anything else,
+/// or a transport error (status 0), is recorded as that step's error.
+fn call(v: Vu, step: string, method: string, path: string, body: string, expect: [int]) -> Reply {
+    let t0 = now_ns();
+    match (http.conn_request(v.conn, method, path, body, v.headers)) {
+        Result.Ok(r) => {
+            let us = (now_ns() - t0) / 1000;
+            let text = http.body_text(r).unwrap_or("");
+            if (expect.contains(r.status)) {
+                stats.ok(v.rec, step, us);
+            } else {
+                stats.fail(v.rec, step, to_string(r.status));
+                if (r.status == 503) {
+                    // Back off like a real client: an open breaker answers instantly, and a
+                    // closed loop would otherwise spin on it.
+                    time.sleep(BACKOFF_MS);
+                }
+            }
+            Reply { status: r.status, text: text }
+        },
+        Result.Err(e) => {
+            stats.fail(v.rec, step, "net");
+            time.sleep(BACKOFF_MS);
+            // A broken connection is reopened by the next request.
+            http.conn_close(v.conn);
+            Reply { status: 0, text: e }
+        },
+    }
+}
+
+fn browse_once(v: Vu) {
+    if (v.iter % 2 == 0) {
+        let _ = call(v, "products.list", "GET", "/api/products", "", [200]);
+    } else {
+        let _ = call(
+            v,
+            "products.get",
+            "GET",
+            "/api/products/" + to_string(1 + v.iter % 6),
+            "",
+            [200]
+        );
+    }
+}
+
+fn cart_once(v: Vu) {
+    let _ = call(v, "cart.add", "POST", "/api/cart/items", `{"product_id":5,"qty":1}`, [200]);
+    let _ = call(v, "cart.get", "GET", "/api/cart", "", [200]);
+    let _ = call(v, "cart.remove", "DELETE", "/api/cart/items/5", "", [200, 204]);
+}
+
+fn status_of(text: string) -> string {
+    json.get_string(json.parse(text).unwrap_or(json.Json.JNull), "status").unwrap_or("")
+}
+
+/// Polls an order until it leaves pending_payment; returns its final status ("timeout" when
+/// `timeout_ms` passes first).
+fn settle(v: Vu, t: Target, order_id: string, timeout_ms: int) -> string {
+    let until = now_ns() + timeout_ms * 1000000;
+    while (now_ns() < until) {
+        let r = call(v, "orders.get", "GET", "/api/orders/" + order_id, "", [200]);
+        let s = status_of(r.text);
+        if (s != "" && s != "pending_payment") {
+            return s;
+        }
+        time.sleep(t.poll_ms);
+    }
+    "timeout"
+}
+
+/// Units in a placed order (usually 1; more when an earlier cart could not be cleared).
+fn units(order: json.Json) -> int {
+    var n = 0;
+    for item in json.get_array(order, "items").unwrap_or([]) {
+        n = n + json.get_int(item, "qty").unwrap_or(0);
+    }
+    n
+}
+
+fn outcome(v: Vu, final: string, us: int, qty: int) {
+    if (final == "paid") {
+        stats.ok(v.rec, "purchase.to_paid", us);
+        stats.count(v.rec, "paid_units", qty);
+    } else if (final == "cancelled") {
+        stats.ok(v.rec, "purchase.to_cancelled", us);
+    }
+    stats.count(v.rec, final, 1);
+}
+
+fn purchase_once(v: Vu, t: Target) {
+    let add = call(
+        v,
+        "cart.add",
+        "POST",
+        "/api/cart/items",
+        `{"product_id":${t.product_id},"qty":1}`,
+        [200]
+    );
+    if (add.status != 200) {
+        return;
+    }
+    let declined = t.declined_every > 0
+        && (v.iter * 7 + v.id) % t.declined_every == t.declined_every - 1;
+    let card = if (declined) { "0002" } else { "4242" };
+    let t0 = now_ns();
+    let placed = call(v, "orders.place", "POST", "/api/orders", `{"card_last4":"${card}"}`, [202]);
+    if (placed.status != 202) {
+        stats.count(v.rec, "place_failed", 1);
+        let _ = call(v, "cart.clear", "DELETE", "/api/cart", "", [200, 204]);
+        return;
+    }
+    let order = json.parse(placed.text).unwrap_or(json.Json.JNull);
+    let id = json.get_string(order, "id").unwrap_or("");
+    let final = settle(v, t, id, t.settle_timeout_ms);
+    outcome(v, final, (now_ns() - t0) / 1000, units(order));
+}
+
+/// Buys one unit per iteration until the product is sold out; returns whether to go on.
+fn drain_once(v: Vu, t: Target) -> bool {
+    let add = call(
+        v,
+        "cart.add",
+        "POST",
+        "/api/cart/items",
+        `{"product_id":${t.product_id},"qty":1}`,
+        [200, 409]
+    );
+    if (add.status == 409) {
+        stats.count(v.rec, "sold_out", 1);
+        return false;
+    }
+    if (add.status != 200) {
+        return true;
+    }
+    let t0 = now_ns();
+    let placed = call(
+        v,
+        "orders.place",
+        "POST",
+        "/api/orders",
+        `{"card_last4":"4242"}`,
+        [202, 409]
+    );
+    if (placed.status == 409) {
+        stats.count(v.rec, "sold_out", 1);
+        let _ = call(v, "cart.clear", "DELETE", "/api/cart", "", [200, 204]);
+        return false;
+    }
+    if (placed.status != 202) {
+        let _ = call(v, "cart.clear", "DELETE", "/api/cart", "", [200, 204]);
+        return true;
+    }
+    let order = json.parse(placed.text).unwrap_or(json.Json.JNull);
+    stats.count(v.rec, "accepted", 1);
+    stats.count(v.rec, "accepted_units", units(order));
+    let id = json.get_string(order, "id").unwrap_or("");
+    outcome(v, settle(v, t, id, t.settle_timeout_ms), (now_ns() - t0) / 1000, units(order));
+    true
+}
+
+/// Runs one VU of `scenario` until `deadline_ns` (monotonic) and returns what it recorded.
+pub fn run_vu(t: Target, scenario: string, id: int, deadline_ns: int) -> stats.Recorder {
+    let base = if (scenario == "browse-direct") { t.products_direct } else { t.gateway };
+    let v = match (new_vu(t, scenario, id, base)) {
+        Result.Ok(v) => v,
+        Result.Err(e) => {
+            let r = stats.new_recorder();
+            stats.fail(r, "connect", "net");
+            eprint("vu ${id}: " + e);
+            return r;
+        },
+    };
+    while (now_ns() < deadline_ns) {
+        if (scenario == "browse" || scenario == "browse-direct") {
+            browse_once(v);
+        } else if (scenario == "cart") {
+            cart_once(v);
+        } else if (scenario == "purchase") {
+            purchase_once(v, t);
+        } else if (scenario == "drain") {
+            if (!drain_once(v, t)) {
+                break;
+            }
+        } else {
+            stats.fail(v.rec, "scenario", "unknown");
+            break;
+        }
+        v.iter = v.iter + 1;
+    }
+    http.conn_close(v.conn);
+    v.rec
+}
+
+pub struct StageResult {
+    scenario: string,
+    vus: int,
+    seconds: float,
+    rec: stats.Recorder,
+    // wall clock, for correlating with docker stats
+    start_ms: int,
+    end_ms: int,
+}
+
+/// Starts `vus` VUs for `seconds` and merges what they recorded. The stage ends when the last
+/// VU returns (a purchase in flight at the deadline is still settled).
+pub fn run_stage(t: Target, scenario: string, vus: int, seconds: int) -> StageResult {
+    let done: Channel<stats.Recorder> = Channel.bounded(vus);
+    let start_ms = time.now();
+    let t0 = now_ns();
+    let deadline = t0 + seconds * 1000000000;
+    for i in 0..vus {
+        spawn(fn() {
+            send(done, run_vu(t, scenario, i, deadline));
+        });
+    }
+    let merged = stats.new_recorder();
+    for _ in 0..vus {
+        match (recv(done)) {
+            Option.Some(r) => stats.merge(merged, r),
+            Option.None => {
+                break;
+            },
+        }
+    }
+    let elapsed = (now_ns() - t0) as float / 1000000000.0;
+    StageResult {
+        scenario: scenario,
+        vus: vus,
+        seconds: elapsed,
+        rec: merged,
+        start_ms: start_ms,
+        end_ms: time.now()
+    }
+}

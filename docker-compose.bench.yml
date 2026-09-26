@@ -1,0 +1,4 @@
+# `make bench` override: raygate without per-IP rate limits (config/raygate.bench.toml).
+services:
+  raygate:
+    volumes: [./config/raygate.bench.toml:/etc/raygate/raygate.toml:ro]

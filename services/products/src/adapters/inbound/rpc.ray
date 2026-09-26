@@ -3,6 +3,8 @@
 //   products.reserve  {order_id, lines}       → {items: [{product_id, name, price_cents, qty}]}
 //   products.commit   {order_id}              → {lines}
 //   products.release  {order_id}              → {lines}
+//   products.restock  {id, qty}               → product (goods received; internal only — the
+//                                               gateway does not route to rpc)
 // Errors travel as "<code>: <message>", so callers can tell out_of_stock from a failure.
 import rpc/rpc;
 import std/json;
@@ -10,7 +12,13 @@ import common/logs;
 import common/tracing;
 from domain/ports import ProductRepository;
 from domain/product import to_json, reserved_to_json, lines_from_json;
-from application/catalog import Catalog, get_product, reserve_stock, commit_reservation, release_reservation;
+from application/catalog import
+    Catalog,
+    get_product,
+    reserve_stock,
+    commit_reservation,
+    release_reservation,
+    restock_product;
 
 fn str_param(req: rpc.Req, key: string) -> Result<string, string> {
     match (json.get_string(req.params, key)) {
@@ -25,10 +33,18 @@ fn count(n: int) -> json.Json {
     json.Json.JObject(m)
 }
 
-pub fn handle<R: ProductRepository>(catalog: Catalog<R>, req: rpc.Req) -> Result<json.Json, string> {
+pub fn handle<R: ProductRepository>(
+    catalog: Catalog<R>,
+    req: rpc.Req
+) -> Result<json.Json, string> {
     let r = dispatch(catalog, req);
     match (r) {
-        Result.Err(e) => logs.warn("products", tracing.trace_id(req.traceparent), "rpc failed", [("method", req.method), ("error", e)]),
+        Result.Err(e) => logs.warn(
+            "products",
+            tracing.trace_id(req.traceparent),
+            "rpc failed",
+            [("method", req.method), ("error", e)]
+        ),
         Result.Ok(_) => logs.info("products", tracing.trace_id(req.traceparent), "rpc", [("method", req.method)]),
     }
     r
@@ -58,5 +74,21 @@ fn dispatch<R: ProductRepository>(catalog: Catalog<R>, req: rpc.Req) -> Result<j
     if (req.method == "products.release") {
         return Result.Ok(count(release_reservation(catalog, str_param(req, "order_id")?)?));
     }
+    if (req.method == "products.restock") {
+        match (both(json.get_int(req.params, "id"), json.get_int(req.params, "qty"))) {
+            Option.Some(p) => return Result.Ok(to_json(restock_product(catalog, p.0, p.1)?)),
+            Option.None => return Result.Err("invalid: products.restock needs 'id' and 'qty'"),
+        }
+    }
     Result.Err("invalid: unknown method ${req.method}")
+}
+
+fn both(a: Option<int>, b: Option<int>) -> Option<(int, int)> {
+    match (a) {
+        Option.Some(x) => match (b) {
+            Option.Some(y) => Option.Some((x, y)),
+            Option.None => Option.None,
+        },
+        Option.None => Option.None,
+    }
 }

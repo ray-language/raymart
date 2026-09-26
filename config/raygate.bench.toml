@@ -1,0 +1,39 @@
+# raygate for `make bench`: config/raygate.toml without the per-IP rate limits. The load
+# generator is one IP, so the limits would measure themselves instead of the system; the
+# bench swaps this file in for its run and puts the normal one back afterwards.
+# Keep the routes in sync with config/raygate.toml.
+
+[server]
+bind = "0.0.0.0"
+port = 8080
+drain_ms = 3000
+metrics_path = "/metrics"
+health_path = "/health"
+
+[[route]]
+name = "products"
+prefix = "/api/products"
+upstream = "http://products:8080"
+timeout_ms = 3000
+retries = 2
+
+[[route]]
+name = "cart"
+prefix = "/api/cart"
+upstream = "http://cart:8080"
+timeout_ms = 3000
+jwt_secret = "raymart-dev-secret-change-me"
+
+[[route]]
+name = "orders"
+prefix = "/api/orders"
+upstream = "http://orders:8080"
+timeout_ms = 5000
+jwt_secret = "raymart-dev-secret-change-me"
+
+[[route]]
+name = "payments"
+prefix = "/api/payments"
+upstream = "http://payment:8080"
+timeout_ms = 3000
+jwt_secret = "raymart-dev-secret-change-me"

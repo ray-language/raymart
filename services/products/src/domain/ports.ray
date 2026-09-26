@@ -12,4 +12,6 @@ pub trait ProductRepository {
     fn commit(self, order_id: string) -> Result<int, string>;
     /// Returns the reserved units to stock (the order was cancelled). Idempotent.
     fn release(self, order_id: string) -> Result<int, string>;
+    /// Adds `qty` units to a product's stock (goods received); returns the product after it.
+    fn restock(self, id: int, qty: int) -> Result<Option<Product>, string>;
 }

@@ -1,0 +1,46 @@
+import resources;
+
+@test
+fn memory_units_become_mib() {
+    assert_eq(resources.mib("512MiB"), 512.0);
+    assert_eq(resources.mib("1.5GiB"), 1536.0);
+    assert_eq(resources.mib(" 2048KiB "), 2.0);
+}
+
+@test
+fn container_names_lose_project_and_replica() {
+    assert_eq(resources.short_name("raymart-products-1"), "products");
+    assert_eq(resources.short_name("raymart-bench-run-3f2a"), "bench-run-3f2a");
+    assert_eq(resources.short_name("raygate"), "raygate");
+}
+
+@test
+fn usage_is_per_window_busiest_first() {
+    let csv = "100,raymart-products-1,50.0%,10MiB / 7.6GiB\n"
+        + "100,raymart-postgres-1,120.5%,40MiB / 7.6GiB\n"
+        + "102,raymart-products-1,70.0%,12MiB / 7.6GiB\n"
+        + "102,raymart-postgres-1,80.5%,44MiB / 7.6GiB\n"
+        + "200,raymart-products-1,900.0%,99MiB / 7.6GiB\n"
+        + "garbage line\n";
+    let s = resources.parse_samples(csv);
+    assert_eq(s.len(), 5);
+    let u = resources.usage(s, 100000, 102000);
+    assert_eq(u.len(), 2);
+    assert_eq(u[0].container, "postgres");
+    assert_eq(u[0].cpu_avg, 100.5);
+    assert_eq(u[0].cpu_max, 120.5);
+    assert_eq(u[0].mem_max, 44.0);
+    assert_eq(u[1].container, "products");
+    assert_eq(u[1].samples, 2);
+}
+
+@test
+fn the_section_has_one_row_per_stage() {
+    let csv = "100,raymart-products-1,50.0%,10MiB / 7.6GiB\n";
+    let tsv = "scenario\tvus\tstart_ms\tend_ms\nbrowse\t8\t99000\t101000\ncart\t8\t300000\t301000\n";
+    let md = resources.section(resources.parse_samples(csv), tsv, "Docker: 8 CPUs");
+    let rows = md.filter(fn(l: string) -> bool { l.starts_with("| browse") || l.starts_with("| cart") });
+    assert_eq(rows.len(), 2);
+    assert(rows[0].contains("products 50.0 (50.0) · 10.0 MiB"));
+    assert(rows[1].contains("no samples"));
+}

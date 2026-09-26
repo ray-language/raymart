@@ -7,3 +7,4 @@
 *.db
 *.kv
 .DS_Store
+/perf/results/

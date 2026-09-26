@@ -51,6 +51,7 @@ make chaos   # checkout con payment caído: el pedido espera y se paga cuando vu
 | **raykv** | clave-valor RESP | Redis | ray-apps, binario nativo |
 | **raywatch** | dashboard de salud | HTTP/SSE | ray-apps, binario nativo |
 | **raylogs** | análisis de logs (perfil `tools`) | stdin | ray-apps, binario nativo |
+| **bench** | generador de carga (perfil `bench`) | HTTP keep-alive · rpc | nuevo (`tools/raymart`) |
 
 ## Arquitectura hexagonal
 
@@ -129,6 +130,8 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
 | `chaos` | resiliencia: payment caído durante un checkout |
 | `trace ID=…` · `log-stats` | raylogs sobre los logs JSON |
 | `token USER_ID=…` | un JWT de desarrollo |
+| `bench` | prueba de carga: 1 → 8 → 32 → 64 usuarios virtuales × 15 s por escenario, invariantes bajo concurrencia, informe en `perf/results/` ([perf/README.md](perf/README.md)) |
+| `bench-quick` | la misma prueba, corta (1 y 16 VUs × 5 s) |
 
 ## Estado
 

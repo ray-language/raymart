@@ -1,0 +1,118 @@
+// The gateway's side of a stage: raygate's Prometheus text (/metrics) read before and after,
+// and the difference per route — what the gateway measured upstream, independent of the
+// load generator's own clock.
+
+/// Every sample of a Prometheus text exposition, keyed by `name{labels}` exactly as printed.
+pub fn parse(text: string) -> Map<string, float> {
+    let m: Map<string, float> = Map.new();
+    for line in text.split("\n") {
+        let t = line.trim();
+        if (t.len() == 0 || t.starts_with("#")) {
+            continue;
+        }
+        let cut = last_index(t, " ");
+        if (cut <= 0) {
+            continue;
+        }
+        match (parse_float(t.substring(cut + 1, t.len()))) {
+            Option.Some(v) => m.insert(t.substring(0, cut), v),
+            Option.None => { },
+        }
+    }
+    m
+}
+
+pub struct RouteDelta {
+    route: string,
+    requests: int,
+    upstream_errors: int,
+    rate_limited: int,
+    breaker_fastfail: int,
+    mean_ms: float,
+    // upper bounds of the histogram bucket holding the percentile ("≤ 25")
+    p50_le: string,
+    p95_le: string,
+    p99_le: string,
+}
+
+fn delta(before: Map<string, float>, after: Map<string, float>, key: string) -> float {
+    after.get(key).unwrap_or(0.0) - before.get(key).unwrap_or(0.0)
+}
+
+const BUCKETS: [string] = [
+    "5",
+    "10",
+    "25",
+    "50",
+    "100",
+    "250",
+    "500",
+    "1000",
+    "2500",
+    "5000",
+    "+Inf"
+];
+
+/// The smallest bucket bound whose cumulative count reaches `p`% of `total`.
+fn bucket_for(
+    before: Map<string, float>,
+    after: Map<string, float>,
+    route: string,
+    total: float,
+    p: int
+) -> string {
+    if (total <= 0.0) {
+        return "-";
+    }
+    let need = total * p as float / 100.0;
+    for le in BUCKETS {
+        let key = "raygate_upstream_ms_bucket{le=\"" + le + "\",route=\"" + route + "\"}";
+        if (delta(before, after, key) >= need) {
+            return "≤ " + le;
+        }
+    }
+    "> 5000"
+}
+
+/// What changed on each route between two scrapes; routes with no traffic are left out.
+pub fn diff(
+    before: Map<string, float>,
+    after: Map<string, float>,
+    routes: [string]
+) -> [RouteDelta] {
+    var out: [RouteDelta] = [];
+    for r in routes {
+        let sel = "{route=\"" + r + "\"}";
+        let requests = delta(before, after, "raygate_requests_total" + sel);
+        let limited = delta(before, after, "raygate_rate_limited_total" + sel);
+        let fastfail = delta(before, after, "raygate_breaker_fastfail_total" + sel);
+        if (requests + limited + fastfail <= 0.0) {
+            continue;
+        }
+        let count = delta(before, after, "raygate_upstream_ms_count" + sel);
+        let sum = delta(before, after, "raygate_upstream_ms_sum" + sel);
+        out.push(
+            RouteDelta {
+                route: r,
+                requests: requests as int,
+                upstream_errors: delta(before, after, "raygate_upstream_errors_total" + sel) as int,
+                rate_limited: limited as int,
+                breaker_fastfail: fastfail as int,
+                mean_ms: if (count > 0.0) { sum / count } else { 0.0 },
+                p50_le: bucket_for(before, after, r, count, 50),
+                p95_le: bucket_for(before, after, r, count, 95),
+                p99_le: bucket_for(before, after, r, count, 99)
+            }
+        );
+    }
+    out
+}
+
+/// The index of the last `sep` in `s`, or -1 (1.27.11 releases have no `last_index_of`).
+pub fn last_index(s: string, sep: string) -> int {
+    let parts = s.split(sep);
+    if (parts.len() < 2) {
+        return -1;
+    }
+    s.len() - parts[parts.len() - 1].len() - sep.len()
+}

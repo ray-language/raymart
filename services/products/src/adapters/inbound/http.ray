@@ -37,6 +37,11 @@ pub fn build<R: ProductRepository>(catalog: Catalog<R>) -> web.App {
 }
 
 fn fail(ctx: web.Ctx, res: web.Res, e: string) {
-    logs.warn("products", tracing.trace_id(web.header_of(ctx, "traceparent")), "request failed", [("path", ctx.path), ("error", e)]);
+    logs.warn(
+        "products",
+        tracing.trace_id(web.header_of(ctx, "traceparent")),
+        "request failed",
+        [("path", ctx.path), ("error", e)]
+    );
     httpx.fail(res, e);
 }

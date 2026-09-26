@@ -6,15 +6,20 @@
 //   raymart order <user> <product> <qty> <card_last4>   add to the cart and check out; prints
 //                                     the order id (for `make chaos`)
 //   raymart status <user> <order_id>  prints the order's status
+//   raymart bench [options]           load test: scenarios over a ramp of VUs, invariants,
+//                                     report (see bench.ray; run it inside the compose network)
+//   raymart bench-resources <dir>     adds the docker stats of a bench run to its report
 import common/auth;
 import common/config;
 import e2e;
+import bench;
+import resources;
 
 const DEFAULT_SECRET: string = "raymart-dev-secret-change-me";
 
 fn usage() -> int {
     eprint(
-        "usage: raymart token <user> [ttl_s] | e2e [gateway_url] | order <user> <product> <qty> <card> | status <user> <order_id>"
+        "usage: raymart token <user> [ttl_s] | e2e [gateway_url] | order <user> <product> <qty> <card> | status <user> <order_id> | bench [--scenarios a,b] [--stages 1,8,32,64] [--duration s] [--out dir] | bench-resources <dir>"
     );
     64
 }
@@ -25,6 +30,16 @@ fn main() -> int {
         return usage();
     }
     let secret = config.get("RAYMART_JWT_SECRET", DEFAULT_SECRET);
+    if (av[0] == "bench") {
+        var rest: [string] = [];
+        for i in 1..av.len() {
+            rest.push(av[i]);
+        }
+        return bench.run(rest);
+    }
+    if (av[0] == "bench-resources" && av.len() == 2) {
+        return resources.run(av[1]);
+    }
     if (av[0] == "token") {
         if (av.len() < 2) {
             return usage();

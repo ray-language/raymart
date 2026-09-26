@@ -1,0 +1,153 @@
+// Latency recording for the load generator. Each virtual user owns a Recorder (fibers do not
+// share heaps), sends it back when its stage ends, and the stage merges them all.
+//
+// A step ("orders.place", "cart.add"…) keeps every latency in microseconds: a stage of a few
+// hundred thousand requests is a few MB, and exact percentiles beat bucket estimates.
+
+pub struct Recorder {
+    steps: [string],
+    latencies: [[int]],
+    // "step|code" → count; the code is the HTTP status, or "net" for a transport error
+    errors: Map<string, int>,
+    // named counters of outcomes ("paid", "cancelled", "timeout", "out_of_stock"…)
+    counters: Map<string, int>,
+}
+
+pub fn new_recorder() -> Recorder {
+    let e: Map<string, int> = Map.new();
+    let c: Map<string, int> = Map.new();
+    Recorder { steps: [], latencies: [], errors: e, counters: c }
+}
+
+fn slot(r: Recorder, step: string) -> int {
+    for i in 0..r.steps.len() {
+        if (r.steps[i] == step) {
+            return i;
+        }
+    }
+    r.steps.push(step);
+    r.latencies.push([]);
+    r.steps.len() - 1
+}
+
+/// Records a successful `step` that took `us` microseconds.
+pub fn ok(r: Recorder, step: string, us: int) {
+    let i = slot(r, step);
+    r.latencies[i].push(us);
+}
+
+/// Records a failed `step` (its latency is not mixed into the successful ones).
+pub fn fail(r: Recorder, step: string, code: string) {
+    let _ = slot(r, step);
+    let key = step + "|" + code;
+    r.errors.insert(key, r.errors.get(key).unwrap_or(0) + 1);
+}
+
+/// Bumps an outcome counter.
+pub fn count(r: Recorder, name: string, n: int) {
+    r.counters.insert(name, r.counters.get(name).unwrap_or(0) + n);
+}
+
+pub fn counter(r: Recorder, name: string) -> int {
+    r.counters.get(name).unwrap_or(0)
+}
+
+/// Adds everything `other` recorded into `into`.
+pub fn merge(into: Recorder, other: Recorder) {
+    for i in 0..other.steps.len() {
+        let j = slot(into, other.steps[i]);
+        for us in other.latencies[i] {
+            into.latencies[j].push(us);
+        }
+    }
+    for k in other.errors.keys() {
+        into.errors.insert(k, into.errors.get(k).unwrap_or(0) + other.errors.get(k).unwrap_or(0));
+    }
+    for k in other.counters.keys() {
+        into.counters.insert(
+            k,
+            into.counters.get(k).unwrap_or(0) + other.counters.get(k).unwrap_or(0)
+        );
+    }
+}
+
+pub struct Summary {
+    step: string,
+    ok: int,
+    errors: int,
+    // "code×n, code×n"
+    error_detail: string,
+    // successful requests per second (failures are counted, not credited as throughput)
+    rps: float,
+    // failed / all, in %
+    error_pct: float,
+    mean_ms: float,
+    p50_ms: float,
+    p90_ms: float,
+    p95_ms: float,
+    p99_ms: float,
+    max_ms: float,
+}
+
+/// The nearest-rank percentile `p` (0–100) of an ascending list, in ms.
+pub fn percentile_ms(sorted: [int], p: int) -> float {
+    if (sorted.len() == 0) {
+        return 0.0;
+    }
+    var rank = (p * sorted.len() + 99) / 100;
+    if (rank < 1) {
+        rank = 1;
+    }
+    if (rank > sorted.len()) {
+        rank = sorted.len();
+    }
+    sorted[rank - 1] as float / 1000.0
+}
+
+/// One line per step, in the order the steps were first seen; `seconds` is the stage's
+/// wall-clock length (for requests per second).
+pub fn summarize(r: Recorder, seconds: float) -> [Summary] {
+    var out: [Summary] = [];
+    for i in 0..r.steps.len() {
+        let step = r.steps[i];
+        let sorted = sort(r.latencies[i]);
+        var total = 0;
+        for us in sorted {
+            total = total + us;
+        }
+        var errors = 0;
+        var detail: [string] = [];
+        for k in sort(r.errors.keys()) {
+            let parts = k.split("|");
+            if (parts[0] == step) {
+                let n = r.errors.get(k).unwrap_or(0);
+                errors = errors + n;
+                detail.push(parts[1] + "×" + to_string(n));
+            }
+        }
+        let n = sorted.len();
+        out.push(
+            Summary {
+                step: step,
+                ok: n,
+                errors: errors,
+                error_detail: detail.join(", "),
+                rps: if (seconds > 0.0) { n as float / seconds } else { 0.0 },
+                error_pct: if (n + errors > 0) { errors as float * 100.0 / (n + errors) as float } else { 0.0 },
+                mean_ms: if (n > 0) { total as float / n as float / 1000.0 } else { 0.0 },
+                p50_ms: percentile_ms(sorted, 50),
+                p90_ms: percentile_ms(sorted, 90),
+                p95_ms: percentile_ms(sorted, 95),
+                p99_ms: percentile_ms(sorted, 99),
+                max_ms: if (n > 0) { sorted[n - 1] as float / 1000.0 } else { 0.0 }
+            }
+        );
+    }
+    out
+}
+
+/// A float with one decimal ("12.3"), for tables.
+pub fn f1(x: float) -> string {
+    let tenths = (x * 10.0 + 0.5) as int;
+    to_string(tenths / 10) + "." + to_string(tenths % 10)
+}

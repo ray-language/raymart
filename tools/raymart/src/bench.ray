@@ -1,0 +1,768 @@
+// `raymart bench`: runs the scenarios of load.ray over a ramp of concurrency, checks the
+// invariants that must survive the load, and writes a report.
+//
+//   <out>/report.md     tables per scenario: req/s, errors, latency percentiles per step,
+//                       the gateway's own upstream histogram, purchase outcomes, invariants
+//   <out>/results.json  the same numbers, for tooling
+//   <out>/stages.tsv    scenario, VUs and wall-clock window of each stage (for
+//                       `raymart bench-resources`, which lines up `docker stats` with them)
+//
+// Meant to run inside the compose network (docker compose run bench …): it reaches the
+// products service directly (to measure the gateway's cost) and its rpc port (to restock).
+import net/http;
+import rpc/rpc;
+import std/fs;
+import std/json;
+import std/time;
+import std/crypto;
+import std/hex;
+import common/config;
+import stats;
+import load;
+import gatewaymetrics as gm;
+
+pub struct Options {
+    scenarios: [string],
+    stages: [int],
+    duration_s: int,
+    out: string,
+    declined_every: int,
+    drain_stock: int,
+    purchase_product: int,
+    drain_product: int,
+}
+
+pub fn default_options() -> Options {
+    Options {
+        scenarios: ["browse", "browse-direct", "cart", "purchase", "drain"],
+        stages: [1, 8, 32, 64],
+        duration_s: 15,
+        out: "perf-results",
+        declined_every: 10,
+        drain_stock: 500,
+        purchase_product: 5,
+        drain_product: 4
+    }
+}
+
+fn ints(csv: string) -> Result<[int], string> {
+    var out: [int] = [];
+    for part in csv.split(",") {
+        match (parse_int(part.trim())) {
+            Option.Some(n) => {
+                if (n <= 0) {
+                    return Result.Err("not a positive number: " + part);
+                }
+                out.push(n);
+            },
+            Option.None => return Result.Err("not a number: " + part),
+        }
+    }
+    Result.Ok(out)
+}
+
+/// Parses `--scenarios a,b --stages 1,8 --duration 15 --out dir --declined-every 10
+/// --drain-stock 500` (every flag optional).
+pub fn parse_options(av: [string]) -> Result<Options, string> {
+    let o = default_options();
+    var i = 0;
+    while (i < av.len()) {
+        let flag = av[i];
+        if (i + 1 >= av.len()) {
+            return Result.Err("missing a value after " + flag);
+        }
+        let val = av[i + 1];
+        if (flag == "--scenarios") {
+            o.scenarios = val.split(",");
+        } else if (flag == "--stages") {
+            o.stages = ints(val)?;
+        } else if (flag == "--duration") {
+            o.duration_s = ints(val)?[0];
+        } else if (flag == "--out") {
+            o.out = val;
+        } else if (flag == "--declined-every") {
+            o.declined_every = parse_int(val).unwrap_or(0);
+        } else if (flag == "--drain-stock") {
+            o.drain_stock = ints(val)?[0];
+        } else {
+            return Result.Err("unknown option " + flag);
+        }
+        i = i + 2;
+    }
+    for s in o.scenarios {
+        if (!["browse", "browse-direct", "cart", "purchase", "drain"].contains(s)) {
+            return Result.Err("unknown scenario " + s);
+        }
+    }
+    Result.Ok(o)
+}
+
+// ---- the system under test ----
+
+struct Env {
+    target: load.Target,
+    rpc_host: string,
+    rpc_port: int,
+    rayq_host: string,
+    rayq_port: int,
+}
+
+// ---- where the saga's work piles up ----
+
+/// The deepest backlog (ready, not yet pulled) each queue reached during a stage: a growing
+/// payment.jobs means the payment worker is the bottleneck, a growing payment.results the
+/// orders consumer; neither growing while latency does points at the outbox relay.
+pub struct QueuePeaks {
+    jobs: int,
+    results: int,
+    samples: int,
+}
+
+fn ready(c: rpc.Client, queue: string) -> int {
+    match (json.parse(`{"queue":"${queue}"}`)) {
+        Result.Ok(p) => match (rpc.call(c, "stats", p)) {
+            Result.Ok(j) => json.get_int(j, "ready").unwrap_or(0),
+            Result.Err(_) => 0,
+        },
+        Result.Err(_) => 0,
+    }
+}
+
+fn sample_queues(host: string, port: int, stop: Channel<int>, out: Channel<QueuePeaks>) {
+    let peaks = QueuePeaks { jobs: 0, results: 0, samples: 0 };
+    match (rpc.connect(host, port)) {
+        Result.Ok(c) => {
+            var going = true;
+            while (going) {
+                match (try_recv(stop)) {
+                    Received.Empty => {
+                        let j = ready(c, "payment.jobs");
+                        let r = ready(c, "payment.results");
+                        if (j > peaks.jobs) {
+                            peaks.jobs = j;
+                        }
+                        if (r > peaks.results) {
+                            peaks.results = r;
+                        }
+                        peaks.samples = peaks.samples + 1;
+                        time.sleep(250);
+                    },
+                    Received.Got(_) => {
+                        going = false;
+                    },
+                    Received.Closed => {
+                        going = false;
+                    },
+                }
+            }
+            rpc.disconnect(c);
+        },
+        Result.Err(_) => { },
+    }
+    send(out, peaks);
+}
+
+fn stock(e: Env, id: int) -> int {
+    match (http.request("GET", e.target.products_direct + "/api/products/" + to_string(id), "")) {
+        Result.Ok(r) => json
+            .get_int(json.parse(http.body_text(r).unwrap_or("")).unwrap_or(json.Json.JNull), "stock")
+            .unwrap_or(-1),
+        Result.Err(_) => -1,
+    }
+}
+
+fn restock(e: Env, id: int, qty: int) -> Result<int, string> {
+    if (qty <= 0) {
+        return Result.Ok(stock(e, id));
+    }
+    let c = rpc.connect(e.rpc_host, e.rpc_port)?;
+    let params = json.parse(`{"id":${id},"qty":${qty}}`)?;
+    let r = rpc.call(c, "products.restock", params);
+    rpc.disconnect(c);
+    Result.Ok(json.get_int(r?, "stock").unwrap_or(-1))
+}
+
+fn scrape(e: Env) -> Map<string, float> {
+    match (http.request("GET", e.target.gateway + "/metrics", "")) {
+        Result.Ok(r) => gm.parse(http.body_text(r).unwrap_or("")),
+        Result.Err(_) => {
+            let m: Map<string, float> = Map.new();
+            m
+        },
+    }
+}
+
+fn serves(url: string) -> bool {
+    match (http.request("GET", url, "")) {
+        Result.Ok(r) => r.status == 200,
+        Result.Err(_) => false,
+    }
+}
+
+/// Waits until the system serves again after a stage (20 consecutive good reads, through the
+/// gateway and straight to products); returns how many seconds that took, or -1 if it did not
+/// within two minutes. A stage that exhausted ephemeral ports or opened a breaker leaves the
+/// next one a broken system otherwise.
+fn recover(e: Env) -> float {
+    let t0 = time.monotonic_millis();
+    var streak = 0;
+    while (time.monotonic_millis() - t0 < 120000) {
+        if (serves(e.target.gateway + "/api/products/1")
+            && serves(e.target.products_direct + "/api/products/1")) {
+            streak = streak + 1;
+            if (streak >= 20) {
+                return (time.monotonic_millis() - t0) as float / 1000.0;
+            }
+            time.sleep(50);
+        } else {
+            streak = 0;
+            time.sleep(500);
+        }
+    }
+    -1.0
+}
+
+// ---- report ----
+
+struct Report {
+    md: [string],
+    stages: [json.Json],
+    tsv: [string],
+    failures: [string],
+}
+
+fn istr(n: int) -> string {
+    to_string(n)
+}
+
+fn jnum(x: float) -> json.Json {
+    json.Json.JNum(x)
+}
+
+fn jint(n: int) -> json.Json {
+    json.Json.JNum(n as float)
+}
+
+fn jstr(s: string) -> json.Json {
+    json.Json.JStr(s)
+}
+
+fn jobj(fields: [(string, json.Json)]) -> json.Json {
+    let m: Map<string, json.Json> = Map.new();
+    for f in fields {
+        m.insert(f.0, f.1);
+    }
+    json.Json.JObject(m)
+}
+
+fn describe(s: string) -> string {
+    if (s == "browse") {
+        return "`GET /api/products` and `GET /api/products/:id` through raygate (PostgreSQL reads)";
+    }
+    if (s == "browse-direct") {
+        return "the same reads straight to the products service: the gap to `browse` is the gateway's cost";
+    }
+    if (s == "cart") {
+        return "add, read and remove a cart line through raygate (raykv + an rpc to products per add)";
+    }
+    if (s == "purchase") {
+        return "add to cart → checkout → poll the order until the saga settles it (outbox → gRPC → rayq → worker → rayq → consumer)";
+    }
+    if (s == "drain") {
+        return "every VU buys one unit of the same product until it sells out: exactly the stock must be sold";
+    }
+    ""
+}
+
+fn step_table(md: [string], vus: int, sums: [stats.Summary]) {
+    for s in sums {
+        md.push(
+            "| "
+                + to_string(vus)
+                + " | `"
+                + to_string(s.step)
+                + "` | "
+                + to_string(stats.f1(s.rps))
+                + " | "
+                + to_string(s.ok)
+                + " | "
+                + if (s.errors > 0) { "**${s.errors}** (${s.error_detail})" } else { "0" }
+                + " | ${stats.f1(s.mean_ms)} | ${stats.f1(s.p50_ms)} | ${stats.f1(s.p90_ms)} | ${stats.f1(s.p95_ms)} | ${stats.f1(s.p99_ms)} | ${stats.f1(s.max_ms)} |"
+        );
+    }
+}
+
+fn summaries_json(sums: [stats.Summary]) -> json.Json {
+    var out: [json.Json] = [];
+    for s in sums {
+        out.push(
+            jobj(
+                [
+                    ("step", jstr(s.step)),
+                    ("ok", jint(s.ok)),
+                    ("errors", jint(s.errors)),
+                    ("error_detail", jstr(s.error_detail)),
+                    ("rps", jnum(s.rps)),
+                    ("mean_ms", jnum(s.mean_ms)),
+                    ("p50_ms", jnum(s.p50_ms)),
+                    ("p90_ms", jnum(s.p90_ms)),
+                    ("p95_ms", jnum(s.p95_ms)),
+                    ("p99_ms", jnum(s.p99_ms)),
+                    ("max_ms", jnum(s.max_ms))
+                ]
+            )
+        );
+    }
+    json.Json.JArray(out)
+}
+
+fn gateway_json(ds: [gm.RouteDelta]) -> json.Json {
+    var out: [json.Json] = [];
+    for d in ds {
+        out.push(
+            jobj(
+                [
+                    ("route", jstr(d.route)),
+                    ("requests", jint(d.requests)),
+                    ("upstream_errors", jint(d.upstream_errors)),
+                    ("rate_limited", jint(d.rate_limited)),
+                    ("breaker_fastfail", jint(d.breaker_fastfail)),
+                    ("mean_ms", jnum(d.mean_ms)),
+                    ("p50_le", jstr(d.p50_le)),
+                    ("p95_le", jstr(d.p95_le)),
+                    ("p99_le", jstr(d.p99_le))
+                ]
+            )
+        );
+    }
+    json.Json.JArray(out)
+}
+
+fn counters_json(r: stats.Recorder) -> json.Json {
+    let m: Map<string, json.Json> = Map.new();
+    for k in r.counters.keys() {
+        m.insert(k, jint(stats.counter(r, k)));
+    }
+    json.Json.JObject(m)
+}
+
+fn check(rep: Report, lines: [string], ok: bool, what: string) {
+    lines.push(if (ok) { "- ✓ " } else { "- ✗ " } + what);
+    if (!ok) {
+        rep.failures.push(what);
+    }
+}
+
+// ---- running ----
+
+const ROUTES: [string] = ["products", "cart", "orders", "payments"];
+
+struct Staged {
+    result: load.StageResult,
+    sums: [stats.Summary],
+    gateway: [gm.RouteDelta],
+    queues: QueuePeaks,
+}
+
+fn stage(e: Env, rep: Report, scenario: string, vus: int, seconds: int) -> Staged {
+    print("  ${scenario} × ${vus} VUs…");
+    let before = scrape(e);
+    let saga = scenario == "purchase" || scenario == "drain";
+    let stop: Channel<int> = Channel.bounded(1);
+    let peaks: Channel<QueuePeaks> = Channel.bounded(1);
+    if (saga) {
+        let host = e.rayq_host;
+        let port = e.rayq_port;
+        spawn(fn() {
+            sample_queues(host, port, stop, peaks);
+        });
+    }
+    let r = load.run_stage(e.target, scenario, vus, seconds);
+    var q = QueuePeaks { jobs: 0, results: 0, samples: 0 };
+    if (saga) {
+        send(stop, 1);
+        q = recv(peaks).unwrap_or(q);
+    }
+    let g = gm.diff(before, scrape(e), ROUTES);
+    let sums = stats.summarize(r.rec, r.seconds);
+    rep.tsv.push("${scenario}\t${vus}\t${r.start_ms}\t${r.end_ms}");
+    rep.stages.push(
+        jobj(
+            [
+                ("scenario", jstr(scenario)),
+                ("vus", jint(vus)),
+                ("seconds", jnum(r.seconds)),
+                ("start_ms", jint(r.start_ms)),
+                ("end_ms", jint(r.end_ms)),
+                ("steps", summaries_json(sums)),
+                ("counters", counters_json(r.rec)),
+                ("gateway", gateway_json(g)),
+                (
+                    "queue_peaks",
+                    jobj([("payment.jobs", jint(q.jobs)), ("payment.results", jint(q.results))])
+                )
+            ]
+        )
+    );
+    Staged { result: r, sums: sums, gateway: g, queues: q }
+}
+
+fn table_header(md: [string]) {
+    md.push("| VUs | step | ok/s | ok | errors | mean ms | p50 | p90 | p95 | p99 | max |");
+    md.push("|---:|---|---:|---:|---|---:|---:|---:|---:|---:|---:|");
+}
+
+fn gateway_table(md: [string], rows: [(int, [gm.RouteDelta])]) {
+    var any = false;
+    for r in rows {
+        if (r.1.len() > 0) {
+            any = true;
+        }
+    }
+    if (!any) {
+        return;
+    }
+    md.push("");
+    md.push(
+        "Measured by raygate (upstream time, from its `/metrics` histogram; percentiles are bucket bounds):"
+    );
+    md.push("");
+    md.push(
+        "| VUs | route | admitted | mean ms | p50 | p95 | p99 | upstream errors | breaker fast-fail | 429 |"
+    );
+    md.push("|---:|---|---:|---:|---|---|---|---:|---:|---:|");
+    for r in rows {
+        for d in r.1 {
+            md.push(
+                "| ${r.0} | ${d.route} | ${d.requests} | ${stats.f1(d.mean_ms)} | ${d.p50_le} | ${d.p95_le} | ${d.p99_le} | ${d.upstream_errors} | ${d.breaker_fastfail} | ${d.rate_limited} |"
+            );
+        }
+    }
+}
+
+// The request steps (not the derived purchase.* timings) summed: the stage's throughput.
+fn total_rps(sums: [stats.Summary]) -> float {
+    var t = 0.0;
+    for s in sums {
+        if (!s.step.starts_with("purchase.")) {
+            t = t + s.rps;
+        }
+    }
+    t
+}
+
+fn find(sums: [stats.Summary], step: string) -> Option<stats.Summary> {
+    for s in sums {
+        if (s.step == step) {
+            return Option.Some(s);
+        }
+    }
+    Option.None
+}
+
+fn ramp(e: Env, o: Options, rep: Report, scenario: string, overview: [string]) {
+    let md = rep.md;
+    md.push("");
+    md.push("## ${scenario}");
+    md.push("");
+    md.push(describe(scenario) + ".");
+    md.push("");
+    table_header(md);
+    var gw: [(int, [gm.RouteDelta])] = [];
+    var outcomes: [string] = [];
+    var notes: [string] = [];
+    for vus in o.stages {
+        var before = 0;
+        var restocked = 0;
+        if (scenario == "purchase") {
+            // Top up to enough units that the stage cannot sell out (a purchase takes well
+            // over 300 ms), without piling stock up run after run.
+            let need = vus * o.duration_s * 4;
+            restocked = restock(e, o.purchase_product, need - stock(e, o.purchase_product)).unwrap_or(
+                -1
+            );
+            before = restocked;
+        }
+        let s = stage(e, rep, scenario, vus, o.duration_s);
+        var errors = 0;
+        for x in s.sums {
+            errors = errors + x.errors;
+        }
+        if (errors > 0) {
+            // Closed sockets hold their ephemeral port for 60 s (TIME_WAIT on Linux): a stage
+            // that ran out of ports would hand the next one a system still out of them.
+            print("    errors in this stage: letting TIME_WAIT drain (65 s)…");
+            time.sleep(65000);
+            notes.push(
+                "- ⚠ ${scenario} × ${vus} failed ${errors} requests; the bench paused 65 s (TIME_WAIT) before the next stage"
+            );
+        }
+        let back = recover(e);
+        if (back < 0.0 || back > 3.0) {
+            notes.push(
+                "- ⚠ after "
+                    + to_string(scenario)
+                    + " × "
+                    + to_string(vus)
+                    + " the system needed "
+                    + if (back < 0.0) { "more than 120" } else { stats.f1(back) }
+                    + " s to serve again"
+            );
+        }
+        step_table(md, vus, s.sums);
+        gw.push((vus, s.gateway));
+        let rps = total_rps(s.sums);
+        var key = "";
+        if (scenario == "purchase") {
+            let r = s.result.rec;
+            let paid = stats.counter(r, "paid");
+            // units, not orders: an order carries 2 when an earlier cart could not be cleared
+            let paid_units = stats.counter(r, "paid_units");
+            let cancelled = stats.counter(r, "cancelled");
+            let timeouts = stats.counter(r, "timeout");
+            let failed = stats.counter(r, "place_failed");
+            let after = stock(e, o.purchase_product);
+            let per_s = (paid + cancelled) as float / s.result.seconds;
+            outcomes.push(
+                "| ${vus} | ${stats.f1(per_s)} | ${paid} | ${cancelled} | ${timeouts} | ${failed} | ${s.queues.jobs} / ${s.queues.results} | ${before} → ${after} (expected ${before - paid_units}) |"
+            );
+            check(
+                rep,
+                notes,
+                after == before - paid_units,
+                "purchase × ${vus}: stock conserved — ${before} − ${paid_units} units paid = ${after}"
+            );
+            check(
+                rep,
+                notes,
+                timeouts == 0,
+                "purchase × ${vus}: every order settled within ${e.target.settle_timeout_ms / 1000} s (${timeouts} did not)"
+            );
+            key = match (find(s.sums, "purchase.to_paid")) {
+                Option.Some(p) => "${stats.f1(per_s)} purchases/s · to paid p50 ${stats.f1(p.p50_ms)} ms, p99 ${stats.f1(p.p99_ms)} ms",
+                Option.None => "${stats.f1(per_s)} purchases/s",
+            };
+        } else {
+            var worst = 0.0;
+            var ok = 0;
+            var errors = 0;
+            for x in s.sums {
+                if (x.p99_ms > worst) {
+                    worst = x.p99_ms;
+                }
+                ok = ok + x.ok;
+                errors = errors + x.errors;
+            }
+            let pct = if (ok + errors > 0) {
+                errors as float * 100.0 / (ok + errors) as float
+            } else {
+                0.0
+            };
+            key = to_string(stats.f1(rps))
+                + " ok/s · worst p99 "
+                + to_string(stats.f1(worst))
+                + " ms · "
+                + if (errors == 0) {
+                    "no errors"
+                } else {
+                    "**${stats.f1(pct)} % errors** (${errors})"
+                };
+        }
+        overview.push("| ${scenario} | ${vus} | ${key} |");
+    }
+    gateway_table(md, gw);
+    if (outcomes.len() > 0) {
+        md.push("");
+        md.push(
+            "Outcomes (every ${o.declined_every}th card is declined, so the compensation runs too):"
+        );
+        md.push("");
+        md.push(
+            "| VUs | purchases/s | paid | cancelled | timeout | checkout failed | peak backlog payment.jobs / payment.results | stock of product ${o.purchase_product} |"
+        );
+        md.push("|---:|---:|---:|---:|---:|---:|---:|---|");
+        for l in outcomes {
+            md.push(l);
+        }
+    }
+    if (notes.len() > 0) {
+        md.push("");
+        for l in notes {
+            md.push(l);
+        }
+    }
+}
+
+fn drain(e: Env, o: Options, rep: Report, overview: [string]) {
+    let md = rep.md;
+    let vus = o.stages[o.stages.len() - 1];
+    e.target.product_id = o.drain_product;
+    let original = stock(e, o.drain_product);
+    let start = restock(e, o.drain_product, o.drain_stock - original).unwrap_or(-1);
+    md.push("");
+    md.push("## drain");
+    md.push("");
+    md.push(describe("drain") + ".");
+    md.push("");
+    table_header(md);
+    // Long enough to sell everything; each VU stops at its first "sold out".
+    let s = stage(e, rep, "drain", vus, o.duration_s * 8);
+    let _ = recover(e);
+    step_table(md, vus, s.sums);
+    gateway_table(md, [(vus, s.gateway)]);
+    let r = s.result.rec;
+    let accepted = stats.counter(r, "accepted_units");
+    let paid = stats.counter(r, "paid");
+    let after = stock(e, o.drain_product);
+    md.push("");
+    md.push(
+        "${vus} VUs raced for ${start} units of product ${o.drain_product} (peak backlog: payment.jobs ${s.queues.jobs}, payment.results ${s.queues.results}):"
+    );
+    md.push("");
+    check(
+        rep,
+        md,
+        accepted == start,
+        "exactly the stock was sold: ${accepted} units accepted for ${start} in stock (never one more)"
+    );
+    check(
+        rep,
+        md,
+        paid == stats.counter(r, "accepted"),
+        "every accepted order was paid (${paid} of ${stats.counter(r, "accepted")})"
+    );
+    check(rep, md, after == 0, "the product ends at 0 units (${after})");
+    check(
+        rep,
+        md,
+        stats.counter(r, "sold_out") == vus,
+        "every VU was told it sold out (409) — ${stats.counter(r, "sold_out")} of ${vus}"
+    );
+    // Leave the catalog as it was.
+    let restored = restock(e, o.drain_product, original).unwrap_or(-1);
+    md.push("");
+    md.push("(Stock restored to ${restored}.)");
+    e.target.product_id = o.purchase_product;
+    let per_s = accepted as float / s.result.seconds;
+    overview.push(
+        "| drain | ${vus} | ${accepted} units sold out in ${stats.f1(s.result.seconds)} s (${stats.f1(per_s)} orders/s) |"
+    );
+}
+
+fn env_from_config() -> Result<Env, string> {
+    let rpc_addr = config.get("RAYMART_PRODUCTS_RPC", "products:9000").split(":");
+    let rayq_addr = config.get("RAYMART_RAYQ", "rayq:7450").split(":");
+    if (rpc_addr.len() != 2 || rayq_addr.len() != 2) {
+        return Result.Err("RAYMART_PRODUCTS_RPC and RAYMART_RAYQ must be host:port");
+    }
+    let t = load.Target {
+        gateway: config.get("RAYMART_GATEWAY", "http://raygate:8080"),
+        products_direct: config.get("RAYMART_PRODUCTS_HTTP", "http://products:8080"),
+        secret: config.get("RAYMART_JWT_SECRET", "raymart-dev-secret-change-me"),
+        run_id: hex.hex_encode(crypto.random_bytes(3)),
+        product_id: 5,
+        declined_every: 10,
+        settle_timeout_ms: 60000,
+        poll_ms: 200
+    };
+    // how often a waiting client asks for its order (the polling is load too)
+    Result.Ok(
+        Env {
+            target: t,
+            rpc_host: rpc_addr[0],
+            rpc_port: parse_int(rpc_addr[1]).unwrap_or(9000),
+            rayq_host: rayq_addr[0],
+            rayq_port: parse_int(rayq_addr[1]).unwrap_or(7450)
+        }
+    )
+}
+
+/// Runs the benchmark; exit 0 when every invariant held.
+pub fn run(av: [string]) -> int {
+    let o = match (parse_options(av)) {
+        Result.Ok(o) => o,
+        Result.Err(e) => {
+            eprint("bench: " + e);
+            return 64;
+        },
+    };
+    let e = match (env_from_config()) {
+        Result.Ok(e) => e,
+        Result.Err(err) => {
+            eprint("bench: " + err);
+            return 64;
+        },
+    };
+    e.target.declined_every = o.declined_every;
+    e.target.product_id = o.purchase_product;
+    let _ = fs.mkdir(o.out);
+    let rep = Report { md: [], stages: [], tsv: ["scenario\tvus\tstart_ms\tend_ms"], failures: [] };
+    let started = time.to_iso8601(time.now_utc());
+    print(
+        "raymart bench → ${o.out} (stages ${o.stages.map(istr).join(", ")} VUs × ${o.duration_s} s)"
+    );
+    var overview: [string] = [];
+    let body = rep.md;
+    var first = true;
+    for sc in o.scenarios {
+        if (!first) {
+            // Every scenario starts on a rested system: sockets closed by the previous one
+            // hold their ephemeral ports for 60 s (TIME_WAIT) even when nothing failed.
+            print("  (65 s pause between scenarios: TIME_WAIT)");
+            time.sleep(65000);
+        }
+        first = false;
+        if (sc == "drain") {
+            drain(e, o, rep, overview);
+        } else {
+            ramp(e, o, rep, sc, overview);
+        }
+    }
+    var head: [string] = [
+        "# raymart — benchmark",
+        "",
+        "Started ${started} · stages of ${o.stages.map(istr).join(" → ")} virtual users × ${o.duration_s} s · closed model (each VU waits for its answer) · keep-alive connections · load generator: native raylang, inside the compose network.",
+        "",
+        "## Overview",
+        "",
+        "| scenario | VUs | throughput and latency |",
+        "|---|---:|---|"
+    ];
+    for l in overview {
+        head.push(l);
+    }
+    head.push("");
+    head.push(
+        "Invariants: "
+            + if (rep.failures.len() == 0) {
+                "all held ✓"
+            } else {
+                "**${rep.failures.len()} failed** ✗"
+            }
+    );
+    for l in body {
+        head.push(l);
+    }
+    let _ = fs.write_file(o.out + "/report.md", head.join("\n") + "\n");
+    let _ = fs.write_file(o.out + "/stages.tsv", rep.tsv.join("\n") + "\n");
+    let doc = jobj(
+        [
+            ("started", jstr(started)),
+            ("stages", json.Json.JArray(rep.stages)),
+            ("invariant_failures", json.Json.JArray(rep.failures.map(jstr)))
+        ]
+    );
+    let _ = fs.write_file(o.out + "/results.json", json.stringify_pretty(doc, 2) + "\n");
+    print("");
+    for l in overview {
+        print(l);
+    }
+    if (rep.failures.len() > 0) {
+        for f in rep.failures {
+            print("✗ " + f);
+        }
+        return 1;
+    }
+    print("invariants: all held ✓ — report in ${o.out}/report.md");
+    0
+}

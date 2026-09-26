@@ -1,0 +1,65 @@
+import stats;
+import std/time;
+
+@test
+fn percentiles_use_the_nearest_rank() {
+    var xs: [int] = [];
+    for i in 1..101 {
+        xs.push(i * 1000);  // 1..100 ms
+    }
+    assert_eq(stats.percentile_ms(xs, 50), 50.0);
+    assert_eq(stats.percentile_ms(xs, 99), 99.0);
+    assert_eq(stats.percentile_ms(xs, 100), 100.0);
+    assert_eq(stats.percentile_ms([7000], 95), 7.0);
+    assert_eq(stats.percentile_ms([], 50), 0.0);
+}
+
+@test
+fn recorders_merge_steps_errors_and_counters() {
+    let a = stats.new_recorder();
+    stats.ok(a, "get", 1000);
+    stats.ok(a, "get", 3000);
+    stats.fail(a, "post", "409");
+    stats.count(a, "paid", 2);
+    let b = stats.new_recorder();
+    stats.ok(b, "post", 5000);
+    stats.ok(b, "get", 2000);
+    stats.fail(b, "post", "409");
+    stats.fail(b, "post", "net");
+    stats.count(b, "paid", 1);
+    stats.merge(a, b);
+
+    let s = stats.summarize(a, 2.0);
+    assert_eq(s.len(), 2);
+    assert_eq(s[0].step, "get");
+    assert_eq(s[0].ok, 3);
+    assert_eq(s[0].p50_ms, 2.0);
+    assert_eq(s[0].mean_ms, 2.0);
+    assert_eq(s[0].rps, 1.5);
+    assert_eq(s[1].step, "post");
+    assert_eq(s[1].ok, 1);
+    assert_eq(s[1].errors, 3);
+    assert_eq(s[1].error_detail, "409×2, net×1");
+    assert_eq(s[1].rps, 0.5);  // only successes count as throughput
+    assert_eq(s[1].error_pct, 75.0);
+    assert_eq(stats.counter(a, "paid"), 3);
+}
+
+@test
+fn recording_stays_linear() {
+    // Recording must not copy the latency list per sample.
+    let r = stats.new_recorder();
+    let t0 = time.monotonic_millis();
+    for i in 0..200000 {
+        stats.ok(r, "hot", i);
+    }
+    assert(time.monotonic_millis() - t0 < 3000);
+    assert_eq(stats.summarize(r, 1.0)[0].ok, 200000);
+}
+
+@test
+fn one_decimal() {
+    assert_eq(stats.f1(12.34), "12.3");
+    assert_eq(stats.f1(0.06), "0.1");
+    assert_eq(stats.f1(3.0), "3.0");
+}
