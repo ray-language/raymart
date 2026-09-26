@@ -1,0 +1,352 @@
+// Loopback tests: a server on port 0 and the client in the same process, speaking real
+// protobuf payloads (a tiny Echo/Sum service built with std/protobuf).
+import grpc/server;
+import grpc/client;
+import grpc/status;
+import std/protobuf;
+import std/time;
+import std/net;
+import grpc/h2;
+from net/http2 import preface, settings_empty, encode_frame;
+from net/hpack import new_hpack, encode, header;
+from grpc/server import Call, Router;
+from grpc/status import Status;
+
+// --- The test service: raymart.test.v1.Calc ---
+// message SumRequest { repeated int64 values = 1; }   (unpacked)  → SumReply { int64 total = 1; }
+// message EchoRequest { string text = 1; int64 repeat = 2; }        → EchoReply { string text = 1; }
+const SUM: string = "/raymart.test.v1.Calc/Sum";
+
+const ECHO: string = "/raymart.test.v1.Calc/Echo";
+
+const FAIL: string = "/raymart.test.v1.Calc/Fail";
+
+const SLOW: string = "/raymart.test.v1.Calc/Slow";
+
+const META: string = "/raymart.test.v1.Calc/Meta";
+
+const PANIC: string = "/raymart.test.v1.Calc/Panic";
+
+fn sum_request(values: [int]) -> bytes {
+    let w = protobuf.writer();
+    for v in values {
+        protobuf.write_varint(w, 1, v);
+    }
+    protobuf.finish(w)
+}
+
+fn echo_request(text: string, repeat: int) -> bytes {
+    let w = protobuf.writer();
+    protobuf.write_string(w, 1, text);
+    protobuf.write_varint(w, 2, repeat);
+    protobuf.finish(w)
+}
+
+fn text_reply(text: string) -> bytes {
+    let w = protobuf.writer();
+    protobuf.write_string(w, 1, text);
+    protobuf.finish(w)
+}
+
+fn sum(c: Call) -> Result<bytes, Status> {
+    let fields = match (protobuf.parse(c.message)) {
+        Result.Ok(f) => f,
+        Result.Err(e) => return status.fail(status.INVALID_ARGUMENT, e),
+    };
+    var total = 0;
+    for f in fields {
+        if (f.number == 1) {
+            total = total + f.int_val;
+        }
+    }
+    let w = protobuf.writer();
+    protobuf.write_varint(w, 1, total);
+    Result.Ok(protobuf.finish(w))
+}
+
+fn echo(c: Call) -> Result<bytes, Status> {
+    let fields = match (protobuf.parse(c.message)) {
+        Result.Ok(f) => f,
+        Result.Err(e) => return status.fail(status.INVALID_ARGUMENT, e),
+    };
+    let text = protobuf.get_string(fields, 1);
+    let repeat = protobuf.get_int(fields, 2);
+    Result.Ok(text_reply(text.repeat(if (repeat > 0) { repeat } else { 1 })))
+}
+
+fn build() -> Router {
+    server
+        .router()
+        .route(SUM, sum)
+        .route(ECHO, echo)
+        .route(FAIL, fn(c: Call) -> Result<bytes, Status> {
+        status.fail(status.NOT_FOUND, "no intent «pi_7» 100% gone\nsecond line")
+    })
+        .route(SLOW, fn(c: Call) -> Result<bytes, Status> {
+        time.sleep(800);
+        Result.Ok(text_reply("late"))
+    })
+        .route(PANIC, fn(c: Call) -> Result<bytes, Status> { panic("boom") })
+        .route(META, fn(c: Call) -> Result<bytes, Status> {
+        let tp = c.metadata.get_or("traceparent", "");
+        let extra = c.metadata.get_or("x-user-id", "");
+        let has_deadline = if (c.deadline > 0) { "deadline" } else { "none" };
+        Result.Ok(text_reply("${tp}|${extra}|${has_deadline}"))
+    })
+}
+
+// Starts a server on an ephemeral port; returns (port, stop channel).
+fn start() -> (int, Channel<int>) {
+    let l = server.bind("127.0.0.1", 0).expect("bind");
+    let stop: Channel<int> = Channel.new();
+    spawn(fn() {
+        match (server.serve_router_until(l, stop, server.default_options(), build)) {
+            Result.Ok(_) => { },
+            Result.Err(e) => eprint("serve: " + e),
+        }
+    });
+    return (l.port, stop);
+}
+
+fn no_md() -> Map<string, string> {
+    let m: Map<string, string> = Map.new();
+    m
+}
+
+fn text_of(b: bytes) -> string {
+    protobuf.get_string(protobuf.parse(b).expect("reply parses"), 1)
+}
+
+@test
+fn unary_round_trip() {
+    let s = start();
+    let r = client
+        .call_once("127.0.0.1", s.0, SUM, sum_request([1, 2, 39]), no_md(), 2000)
+        .expect("call");
+    assert_eq(r.status, status.OK);
+    assert_eq(protobuf.get_int(protobuf.parse(r.message).expect("parse"), 1), 42);
+    let e = client
+        .call_once("127.0.0.1", s.0, ECHO, echo_request("hé", 3), no_md(), 0)
+        .expect("call");
+    assert_eq(text_of(e.message), "héhéhé");
+    close(s.1);
+}
+
+@test
+fn unknown_method_is_unimplemented() {
+    let s = start();
+    let r = client
+        .call_once("127.0.0.1", s.0, "/raymart.test.v1.Calc/Nope", b"", no_md(), 2000)
+        .expect("call");
+    assert_eq(r.status, status.UNIMPLEMENTED);
+    assert(r.status_message.contains("/raymart.test.v1.Calc/Nope"));
+    close(s.1);
+}
+
+@test
+fn handler_status_and_encoded_message() {
+    let s = start();
+    let r = client.call_once("127.0.0.1", s.0, FAIL, b"", no_md(), 2000).expect("call");
+    assert_eq(r.status, status.NOT_FOUND);
+    assert_eq(r.status_message, "no intent «pi_7» 100% gone\nsecond line");
+    let res = client.into_result(r);
+    assert(res.is_err());
+    close(s.1);
+}
+
+@test
+fn a_panicking_handler_is_internal() {
+    let s = start();
+    let c = client.connect("127.0.0.1", s.0).expect("connect");
+    let r = client.call(c, PANIC, b"", no_md(), 2000).expect("call");
+    assert_eq(r.status, status.INTERNAL);
+    let ok = client.call(c, SUM, sum_request([1]), no_md(), 2000).expect("call");
+    assert_eq(ok.status, status.OK);
+    client.disconnect(c);
+    close(s.1);
+}
+
+@test
+fn metadata_reaches_the_handler() {
+    let s = start();
+    let md: Map<string, string> = Map.new();
+    md.insert("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+    md.insert("X-User-Id", "ada");
+    let r = client.call_once("127.0.0.1", s.0, META, b"", md, 3000).expect("call");
+    assert_eq(r.status, status.OK);
+    assert_eq(
+        text_of(r.message),
+        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01|ada|deadline"
+    );
+    close(s.1);
+}
+
+@test
+fn several_calls_share_one_connection() {
+    let s = start();
+    let c = client.connect("127.0.0.1", s.0).expect("connect");
+    for i in 0..20 {
+        let r = client.call(c, SUM, sum_request([i, i, 1]), no_md(), 2000).expect("call");
+        assert_eq(protobuf.get_int(protobuf.parse(r.message).expect("parse"), 1), 2 * i + 1);
+    }
+    let bad = client.call(c, "/x.Y/Z", b"", no_md(), 2000).expect("call");
+    assert_eq(bad.status, status.UNIMPLEMENTED);
+    let again = client.call(c, ECHO, echo_request("ok", 1), no_md(), 2000).expect("call");
+    assert_eq(text_of(again.message), "ok");
+    assert_eq(c.next_id, 45);
+    client.disconnect(c);
+    close(s.1);
+}
+
+@test
+fn large_messages_cross_flow_control() {
+    let s = start();
+    let c = client.connect("127.0.0.1", s.0).expect("connect");
+    // ~200 KiB request (beyond the 64 KiB initial windows and 16 KiB frames) ...
+    let big = "0123456789abcdef".repeat(12800);
+    let r = client.call(c, ECHO, echo_request(big, 1), no_md(), 10000).expect("call");
+    assert_eq(r.status, status.OK);
+    assert_eq(text_of(r.message).len(), big.len());
+    // ... and a ~400 KiB response from a small request.
+    let r2 = client
+        .call(c, ECHO, echo_request("0123456789abcdef".repeat(1600), 16), no_md(), 10000)
+        .expect("call");
+    assert_eq(r2.status, status.OK);
+    assert_eq(text_of(r2.message).len(), 409600);
+    client.disconnect(c);
+    close(s.1);
+}
+
+@test
+fn oversized_request_is_resource_exhausted() {
+    let l = server.bind("127.0.0.1", 0).expect("bind");
+    let stop: Channel<int> = Channel.new();
+    spawn(fn() {
+        let _ = server.serve_until(l, stop, server.Options {
+            max_message: 1024
+        }, fn(c: Call) -> Result<bytes, Status> {
+            Result.Ok(c.message)
+        });
+    });
+    let c = client.connect("127.0.0.1", l.port).expect("connect");
+    let r = client.call(c, ECHO, echo_request("x".repeat(100000), 1), no_md(), 5000).expect("call");
+    assert_eq(r.status, status.RESOURCE_EXHAUSTED);
+    // The connection survives.
+    let ok = client.call(c, ECHO, echo_request("small", 1), no_md(), 5000).expect("call");
+    assert_eq(ok.status, status.OK);
+    client.disconnect(c);
+    close(stop);
+}
+
+@test
+fn deadline_does_not_hang() {
+    let s = start();
+    let c = client.connect("127.0.0.1", s.0).expect("connect");
+    let t0 = time.monotonic();
+    let r = client.call(c, SLOW, b"", no_md(), 200).expect("call");
+    let took = time.monotonic() - t0;
+    assert_eq(r.status, status.DEADLINE_EXCEEDED);
+    assert(took < 700);
+    // The same connection keeps working after the cancelled stream.
+    let ok = client.call(c, SUM, sum_request([5]), no_md(), 3000).expect("call");
+    assert_eq(ok.status, status.OK);
+    assert_eq(protobuf.get_int(protobuf.parse(ok.message).expect("parse"), 1), 5);
+    client.disconnect(c);
+    close(s.1);
+}
+
+@test
+fn transport_errors_are_err() {
+    let l = server.bind("127.0.0.1", 0).expect("bind");
+    let port = l.port;
+    close(l.handle);
+    assert(client.call_once("127.0.0.1", port, SUM, b"", no_md(), 1000).is_err());
+    assert_eq(
+        client.outcome(client.call_once("127.0.0.1", port, SUM, b"", no_md(), 1000)).is_err(),
+        true
+    );
+}
+
+@test
+fn status_helpers() {
+    assert_eq(status.percent_encode("plain text"), "plain text");
+    assert_eq(status.percent_encode("100%"), "100%25");
+    assert_eq(status.percent_encode("ñ\n"), "%C3%B1%0A");
+    assert_eq(status.percent_decode("%C3%B1%0A 100%25 %zz"), "ñ\n 100% %zz");
+    assert_eq(status.code_name(status.UNIMPLEMENTED), "UNIMPLEMENTED");
+    assert_eq(status.code_name(99), "CODE_99");
+    assert_eq(server.parse_timeout("250m"), 250);
+    assert_eq(server.parse_timeout("2S"), 2000);
+    assert_eq(server.parse_timeout("1500u"), 2);
+    assert_eq(server.parse_timeout("1H"), 3600000);
+    assert_eq(server.parse_timeout("abc"), 0 - 1);
+    assert_eq(status.from_http(503), status.UNAVAILABLE);
+}
+
+@test
+fn interleaved_streams_padding_and_continuation() {
+    // A hand-driven client: two streams whose frames interleave, a header block split into
+    // HEADERS + CONTINUATION and a PADDED DATA frame.
+    let s = start();
+    let sock = net.tcp_connect("127.0.0.1", s.0).expect("connect");
+    let enc = new_hpack();
+    let hs = fn(path: string) -> bytes {
+        encode(
+            enc,
+            [
+                header(":method", "POST"),
+                header(":scheme", "http"),
+                header(":path", path),
+                header(":authority", "test"),
+                header("content-type", "application/grpc"),
+                header("te", "trailers")
+            ]
+        )
+    };
+    let b1 = hs(SUM);
+    let b3 = hs(ECHO);
+    let m1 = protobuf.grpc_frame(sum_request([40, 2]));
+    let m3 = protobuf.grpc_frame(echo_request("three", 2));
+    let half = m1.len() / 2;
+    let padded = bytes_of([3]) + m1.sub_bytes(half, m1.len()) + bytes_of([0, 0, 0]);
+    let out = preface()
+        + settings_empty()
+        + encode_frame(h2.HEADERS, 0, 1, b1.sub_bytes(0, 5))
+        + encode_frame(h2.CONTINUATION, h2.END_HEADERS, 1, b1.sub_bytes(5, b1.len()))
+        + encode_frame(h2.DATA, 0, 1, m1.sub_bytes(0, half))
+        + encode_frame(h2.HEADERS, h2.END_HEADERS, 3, b3)
+        + encode_frame(h2.DATA, h2.END_STREAM, 3, m3)
+        + encode_frame(h2.DATA, h2.END_STREAM | h2.PADDED, 1, padded);
+    net.socket_write_bytes(sock, out).expect("write");
+
+    let l = h2.new_link(sock);
+    h2.set_deadline(l, time.monotonic() + 3000);
+    let bodies: Map<int, bytes> = Map.new();
+    let statuses: Map<int, string> = Map.new();
+    var ended = 0;
+    while (ended < 2) {
+        let fr = h2.read_frame(l).expect("frame");
+        if (!h2.control(l, fr).expect("control")) {
+            if (fr.ftype == h2.HEADERS) {
+                let got = h2.decode_headers(l, fr.payload).expect("hpack");
+                let st = h2.find(got, "grpc-status");
+                if (st != "") {
+                    statuses.insert(fr.stream_id, st);
+                }
+            } else if (fr.ftype == h2.DATA) {
+                bodies.insert(fr.stream_id, bodies.get_or(fr.stream_id, b"") + fr.payload);
+            }
+            if ((fr.flags & h2.END_STREAM) != 0) {
+                ended = ended + 1;
+            }
+        }
+    }
+    close(sock);
+    assert_eq(statuses.get_or(1, "?"), "0");
+    assert_eq(statuses.get_or(3, "?"), "0");
+    let r1 = protobuf.grpc_unframe(bodies.get_or(1, b"")).expect("unframe 1");
+    assert_eq(protobuf.get_int(protobuf.parse(r1).expect("parse"), 1), 42);
+    let r3 = protobuf.grpc_unframe(bodies.get_or(3, b"")).expect("unframe 3");
+    assert_eq(text_of(r3), "threethree");
+    close(s.1);
+}

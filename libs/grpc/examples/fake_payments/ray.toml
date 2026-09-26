@@ -1,0 +1,10 @@
+# The interop target of libs/grpc: a fake raymart.payment.v1.Payments server
+# (proto/payment.proto) with an in-memory store. See main.ray.
+[package]
+name = "fake_payments"
+version = "0.1.0"
+entry = "main.ray"
+
+[dependencies]
+grpc = "path:../../../grpc"
+net = "^0.3.5"

@@ -1,0 +1,13 @@
+# gRPC over cleartext HTTP/2 (h2c, prior knowledge): a unary server and client for the
+# raymart services. Imported by path (`grpc = "path:../../libs/grpc"`, plus `net`) as
+# `grpc/server`, `grpc/client`, `grpc/status`.
+[package]
+name = "grpc"
+version = "0.1.0"
+entry = "server.ray"
+
+[dependencies]
+net = "^0.3.5"
+# The package's modules import each other as `grpc/<module>` (the only name a consumer can
+# resolve them by); this self-reference lets `ray test` here resolve those imports too.
+grpc = "path:../grpc"

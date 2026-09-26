@@ -1,0 +1,9 @@
+syntax = "proto3";
+package raymart.payment.v1;
+service Payments {
+  rpc CreateIntent(CreateIntentRequest) returns (Intent);
+  rpc GetIntent(GetIntentRequest) returns (Intent);
+}
+message CreateIntentRequest { string order_id = 1; int64 amount_cents = 2; string currency = 3; string card_last4 = 4; string user_id = 5; }
+message GetIntentRequest { string id = 1; }
+message Intent { string id = 1; string order_id = 2; int64 amount_cents = 3; string currency = 4; string status = 5; string reason = 6; string user_id = 7; }
