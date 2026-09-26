@@ -106,8 +106,7 @@ fn scenario_paid(c: Ctx) {
     check(c, stock(c, 5) == before - 2, "checkout reserved the stock");
     check(
         c,
-        json
-            .get_array(req(c, "GET", "/api/cart", "", user).body, "items")
+        json.get_array(req(c, "GET", "/api/cart", "", user).body, "items")
             .unwrap_or([json.Json.JNull])
             .len() == 0,
         "checkout emptied the cart"

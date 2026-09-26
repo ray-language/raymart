@@ -164,8 +164,7 @@ fn sample_queues(host: string, port: int, stop: Channel<int>, out: Channel<Queue
 
 fn stock(e: Env, id: int) -> int {
     match (http.request("GET", e.target.products_direct + "/api/products/" + to_string(id), "")) {
-        Result.Ok(r) => json
-            .get_int(json.parse(http.body_text(r).unwrap_or("")).unwrap_or(json.Json.JNull), "stock")
+        Result.Ok(r) => json.get_int(json.parse(http.body_text(r).unwrap_or("")).unwrap_or(json.Json.JNull), "stock")
             .unwrap_or(-1),
         Result.Err(_) => -1,
     }

@@ -4,8 +4,8 @@
 [package]
 name = "grpc"
 version = "0.1.0"
-raylang = "1.27.14"
+raylang = "1.27.15"
 entry = "server.ray"
 
 [dependencies]
-net = "^0.3.7"
+net = "^0.3.8"
