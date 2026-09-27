@@ -1,9 +1,9 @@
 // IntentRepository on MongoDB (collection `intents`, one document per intent, `_id` = the
-// intent id), over a pool of connections (common/pool.ray): the SCRAM handshake is paid once
-// per connection, not per operation. `create_if_absent` relies on a UNIQUE index on order_id,
-// so two concurrent requests for the same order cannot create two intents.
+// intent id), over a `mongo.Pool` (db): the SCRAM handshake is paid once per connection, not per
+// operation. `create_if_absent` relies on a UNIQUE index on order_id, so two concurrent requests
+// for the same order cannot create two intents.
 import db/mongo;
-import common/pool;
+import net/pool;
 import db/bson;
 import std/crypto;
 import std/hex;
@@ -12,12 +12,7 @@ from domain/ports import IntentRepository;
 from domain/intent import Intent;
 
 pub struct MongoIntents {
-    host: string,
-    port: int,
-    user: string,
-    password: string,
-    database: string,
-    conns: pool.Pool<mongo.Conn>,
+    db: mongo.Pool,
 }
 
 /// The repository with a pool of up to `pool_size` connections (dialed on demand).
@@ -29,25 +24,19 @@ pub fn new_intents(
     database: string,
     pool_size: int
 ) -> MongoIntents {
-    MongoIntents {
-        host: host,
-        port: port,
-        user: user,
-        password: password,
-        database: database,
-        conns: pool.new_pool(pool_size)
-    }
+    MongoIntents { db: mongo.pool(host, port, user, password, database, pool_size) }
 }
 
 const COLL: string = "intents";
 
 fn open(r: MongoIntents) -> Result<mongo.Conn, string> {
+    let cfg = r.db.cfg;
     match (mongo.connect(
-        r.host,
-        r.port,
-        r.user,
-        r.password,
-        r.database,
+        cfg.host,
+        cfg.port,
+        cfg.user,
+        cfg.password,
+        cfg.database,
         hex.hex_encode(crypto.random_bytes(18))
     )) {
         Result.Ok(c) => Result.Ok(c),
@@ -55,13 +44,14 @@ fn open(r: MongoIntents) -> Result<mongo.Conn, string> {
     }
 }
 
-/// Runs `op` on a pooled connection; a reused connection that fails on the wire is replaced
-/// and `op` runs once more (common/pool.ray). Every operation here is idempotent: the intent is
-/// unique per order, and `finish` is a compare-and-set.
+/// Runs `op` on a pooled connection (net/pool); a reused connection that fails on the wire is
+/// replaced and `op` runs once more. Every operation here is idempotent: the intent is unique
+/// per order, and `finish` is a compare-and-set. (`mongo.pool_with` would do the rest, but it
+/// never retries — RAYLANG-FINDINGS #96.)
 fn with_conn<T>(r: MongoIntents, op: fn(mongo.Conn) -> Result<T, string>) -> Result<T, string> {
-    pool.run(r.conns, true, fn() -> Result<mongo.Conn, string> { open(r) }, fn(c: mongo.Conn) {
+    pool.run(r.db.slots, fn() -> Result<mongo.Conn, string> { open(r) }, fn(c: mongo.Conn) {
         mongo.disconnect(c);
-    }, op)
+    }, op, true)
 }
 
 fn s(v: string) -> bson.Bson {
@@ -144,7 +134,7 @@ pub fn migrate(r: MongoIntents, attempts: int) -> Result<int, string> {
                             ]
                         )
                     ),
-                    bson.field("$db", s(r.database))
+                    bson.field("$db", s(r.db.cfg.database))
                 ];
                 let res = mongo.run_command(c, cmd);
                 mongo.disconnect(c);
