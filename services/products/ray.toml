@@ -5,7 +5,7 @@ raylang = "1.27.15"
 
 [dependencies]
 common = "path:../../libs/common"
-net = "^0.4.0"
+net = "^0.4.1"
 rpc = "^0.1.3"
 web = "^0.4.5"
-db = "^0.2.0"
+db = "^0.2.1"

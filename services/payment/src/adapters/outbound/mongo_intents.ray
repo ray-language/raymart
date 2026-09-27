@@ -46,8 +46,8 @@ fn open(r: MongoIntents) -> Result<mongo.Conn, string> {
 
 /// Runs `op` on a pooled connection (net/pool); a reused connection that fails on the wire is
 /// replaced and `op` runs once more. Every operation here is idempotent: the intent is unique
-/// per order, and `finish` is a compare-and-set. (`mongo.pool_with` would do the rest, but it
-/// never retries — RAYLANG-FINDINGS #96.)
+/// per order, and `finish` is a compare-and-set, so all of them retry (`mongo.pool_with` never
+/// does: it is meant for blocks that must not run twice).
 fn with_conn<T>(r: MongoIntents, op: fn(mongo.Conn) -> Result<T, string>) -> Result<T, string> {
     pool.run(r.db.slots, fn() -> Result<mongo.Conn, string> { open(r) }, fn(c: mongo.Conn) {
         mongo.disconnect(c);

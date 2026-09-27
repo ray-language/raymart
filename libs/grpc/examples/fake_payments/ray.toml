@@ -8,4 +8,4 @@ entry = "main.ray"
 
 [dependencies]
 grpc = "path:../../../grpc"
-net = "^0.4.0"
+net = "^0.4.1"

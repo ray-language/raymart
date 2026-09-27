@@ -5,5 +5,5 @@ raylang = "1.27.15"
 
 [dependencies]
 common = "path:../../libs/common"
-net = "^0.4.0"
+net = "^0.4.1"
 rpc = "^0.1.3"
