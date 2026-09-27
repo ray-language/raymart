@@ -175,7 +175,7 @@ services:
   raygate:
     build:
       <<: *raylang-build
-      args: { APP_REPO: "https://github.com/ray-language/raygate.git", APP_REF: "5b753e4" }
+      args: { APP_REPO: "https://github.com/ray-language/raygate.git", APP_REF: "2df702b" }
     command: ["--config", "/etc/raygate/raygate.toml"]
     volumes: [./config/raygate.toml:/etc/raygate/raygate.toml:ro]
     ports: ["127.0.0.1:8088:8080"]

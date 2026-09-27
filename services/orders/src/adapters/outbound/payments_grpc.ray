@@ -1,12 +1,12 @@
 // Payments over the payment service's gRPC API (proto/payment.proto, CreateIntent), on the
 // raymart gRPC client (h2c). This adapter owns the mapping between the order's payment
 // request and the protobuf contract, and between gRPC status codes and the domain's errors.
-// HTTP/2 connections are kept in a pool (common/pool.ray) and reused call after call; one that
-// fails or receives GOAWAY is closed and redialed on the next checkout.
+// HTTP/2 connections are kept in a pool (net/pool) and reused call after call; one that fails or
+// receives GOAWAY is closed and its slot redialed on the next call.
 import std/json;
 import grpc/client;
 import common/paymentpb;
-import common/pool;
+import net/pool;
 import common/tracing;
 from domain/ports import Payments;
 
@@ -23,12 +23,7 @@ pub fn new_payments_grpc(
     deadline_ms: int,
     pool_size: int
 ) -> PaymentsGrpc {
-    PaymentsGrpc {
-        host: host,
-        port: port,
-        deadline_ms: deadline_ms,
-        conns: pool.new_pool(pool_size)
-    }
+    PaymentsGrpc { host: host, port: port, deadline_ms: deadline_ms, conns: pool.new(pool_size) }
 }
 
 /// One unary call on a pooled connection; the connection goes back unless the call failed or
@@ -40,19 +35,22 @@ fn call_pooled(
     message: bytes,
     md: Map<string, string>
 ) -> Result<client.Reply, string> {
-    let lease = pool.checkout(p.conns, fn() -> Result<client.Conn, string> {
-        match (client.connect(p.host, p.port)) {
-            Result.Ok(c) => Result.Ok(c),
-            Result.Err(e) => Result.Err("unavailable: payment: " + e),
-        }
-    })?;
-    let c = lease.conn;
+    let c = match (pool.acquire(p.conns)?) {
+        pool.Slot.Ready(c) => c,
+        pool.Slot.Empty => match (client.connect(p.host, p.port)) {
+            Result.Ok(c) => c,
+            Result.Err(e) => {
+                pool.release_empty(p.conns);
+                return Result.Err("unavailable: payment: " + e);
+            },
+        },
+    };
     let r = client.call(c, path, message, md, p.deadline_ms);
     if (r.is_ok() && client.usable(c)) {
-        pool.checkin(p.conns, c);
+        pool.release(p.conns, c);
     } else {
         client.disconnect(c);
-        pool.discard(p.conns);
+        pool.release_empty(p.conns);
     }
     r
 }

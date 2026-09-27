@@ -146,6 +146,33 @@ fn postgres_survives_connections_killed_by_the_server() {
     }
     let r = postgres.new_products(it_host(), 55432, "products", "products", "products", 1);
     assert(r.find(1).is_ok());  // the pool now holds one idle connection
+    kill_products_connections();
+    match (r.find(1)) {
+        Result.Ok(found) => assert(found.is_some()),
+        Result.Err(e) => panic("a killed pooled connection surfaced: " + e),
+    }
+}
+
+// The same for a transaction: BEGIN on a connection the server closed must not surface either.
+@test
+fn postgres_a_reservation_survives_connections_killed_by_the_server() {
+    if (!enabled()) {
+        return;
+    }
+    let r = postgres.new_products(it_host(), 55432, "products", "products", "products", 1);
+    set_stock(3, 10);
+    assert(r.find(3).is_ok());  // the pool now holds one idle connection
+    kill_products_connections();
+    let o = order_id("it-kill");
+    match (r.reserve(o, [Line { product_id: 3, qty: 1 }])) {
+        Result.Ok(lines) => assert_eq(lines.len(), 1),
+        Result.Err(e) => panic("a killed pooled connection surfaced on reserve: " + e),
+    }
+    assert_eq(r.release(o).unwrap_or(-1), 1);
+}
+
+/// Ends every other session of the `products` user (what a server restart does to them).
+fn kill_products_connections() {
     let admin = match (pg.connect(
         it_host(),
         55432,
@@ -164,8 +191,4 @@ fn postgres_survives_connections_killed_by_the_server() {
     );
     pg.disconnect(admin);
     assert(killed.is_ok());
-    match (r.find(1)) {
-        Result.Ok(found) => assert(found.is_some()),
-        Result.Err(e) => panic("a killed pooled connection surfaced: " + e),
-    }
 }

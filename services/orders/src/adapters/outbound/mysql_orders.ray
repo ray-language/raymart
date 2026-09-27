@@ -1,19 +1,14 @@
-// OrderRepository on MySQL over a pool of connections (common/pool.ray): each operation checks
-// a connection out and gives it back — or closes it if the wire failed. The order, its items
-// and its outbox message are written in ONE transaction.
+// OrderRepository on MySQL over a `mysql.Pool` (db): each operation takes a pooled connection
+// and gives it back — or closes it if the wire failed. The order, its items and its outbox
+// message are written in ONE transaction.
 import db/mysql;
-import common/pool;
+import net/pool;
 import std/time;
 from domain/ports import OrderRepository;
 from domain/order import Order, OrderItem, OutboxEntry;
 
 pub struct MysqlOrders {
-    host: string,
-    port: int,
-    user: string,
-    password: string,
-    database: string,
-    conns: pool.Pool<mysql.Conn>,
+    db: mysql.Pool,
 }
 
 /// The repository with a pool of up to `pool_size` connections (dialed on demand).
@@ -25,18 +20,12 @@ pub fn new_orders(
     database: string,
     pool_size: int
 ) -> MysqlOrders {
-    MysqlOrders {
-        host: host,
-        port: port,
-        user: user,
-        password: password,
-        database: database,
-        conns: pool.new_pool(pool_size)
-    }
+    MysqlOrders { db: mysql.pool(host, port, user, password, database, pool_size) }
 }
 
 fn open(r: MysqlOrders) -> Result<mysql.Conn, string> {
-    match (mysql.connect(r.host, r.port, r.user, r.password, r.database)) {
+    let cfg = r.db.cfg;
+    match (mysql.connect(cfg.host, cfg.port, cfg.user, cfg.password, cfg.database)) {
         Result.Ok(c) => Result.Ok(c),
         Result.Err(e) => Result.Err("unavailable: orders database: " + e),
     }
@@ -46,14 +35,28 @@ fn close_conn(c: mysql.Conn) {
     mysql.disconnect(c);
 }
 
-/// Runs `op` on a pooled connection. With `retry` (idempotent operations only), a reused
-/// connection that fails on the wire is replaced and `op` runs once more (common/pool.ray).
+/// Runs `op` on a pooled connection (net/pool). With `retry` (idempotent operations only), a
+/// reused connection that fails on the wire is replaced and `op` runs once more.
 fn with_conn<T>(
     r: MysqlOrders,
     retry: bool,
     op: fn(mysql.Conn) -> Result<T, string>
 ) -> Result<T, string> {
-    pool.run(r.conns, retry, fn() -> Result<mysql.Conn, string> { open(r) }, close_conn, op)
+    pool.run(r.db.slots, fn() -> Result<mysql.Conn, string> { open(r) }, close_conn, op, retry)
+}
+
+/// Gives a connection back after an operation that ended with `out`: closed and its slot
+/// emptied when the wire failed, back to the pool otherwise.
+fn give_back<T>(r: MysqlOrders, c: mysql.Conn, out: Result<T, string>) {
+    match (out) {
+        Result.Err(e) => if (pool.is_wire_error(e)) {
+            close_conn(c);
+            pool.release_empty(r.db.slots);
+        } else {
+            pool.release(r.db.slots, c);
+        },
+        Result.Ok(_) => pool.release(r.db.slots, c),
+    }
 }
 
 // The order, its items and its outbox message in one transaction. Err("begin: …") when the
@@ -225,26 +228,39 @@ fn outbox_on(c: mysql.Conn, limit: int) -> Result<[OutboxEntry], string> {
 
 impl OrderRepository for MysqlOrders {
     fn create(self, order: Order, outbox_kind: string, outbox_payload: string) -> Result<int, string> {
-        // Not idempotent (a lost COMMIT acknowledgement must not become a second attempt), so a
-        // stale connection is only replaced when the transaction could not even begin.
-        let lease = pool.checkout(self.conns, fn() -> Result<mysql.Conn, string> { open(self) })?;
-        let out = create_tx(lease.conn, order, outbox_kind, outbox_payload);
-        let error = pool.error_of(out);
-        if (lease.reused && error.starts_with("begin: ")) {
-            close_conn(lease.conn);
+        // Not idempotent (a lost COMMIT acknowledgement must not become a second attempt), so
+        // `mysql.pool_tx` would do, but it never retries: a stale connection is replaced here
+        // when the transaction could not even begin (RAYLANG-FINDINGS #96).
+        let (c, reused) = match (pool.acquire(self.db.slots)?) {
+            pool.Slot.Ready(c) => (c, true),
+            pool.Slot.Empty => match (open(self)) {
+                Result.Ok(c) => (c, false),
+                Result.Err(e) => {
+                    pool.release_empty(self.db.slots);
+                    return Result.Err(e);
+                },
+            },
+        };
+        let out = create_tx(c, order, outbox_kind, outbox_payload);
+        let began = match (out) {
+            Result.Err(e) => !e.starts_with("begin: "),
+            Result.Ok(_) => true,
+        };
+        if (reused && !began) {
+            close_conn(c);
             return match (open(self)) {
-                Result.Ok(c) => {
-                    let again = create_tx(c, order, outbox_kind, outbox_payload);
-                    pool.give_back(self.conns, c, pool.error_of(again), close_conn);
+                Result.Ok(fresh) => {
+                    let again = create_tx(fresh, order, outbox_kind, outbox_payload);
+                    give_back(self, fresh, again);
                     again
                 },
                 Result.Err(e) => {
-                    pool.discard(self.conns);
+                    pool.release_empty(self.db.slots);
                     Result.Err(e)
                 },
             };
         }
-        pool.give_back(self.conns, lease.conn, error, close_conn);
+        give_back(self, c, out);
         out
     }
 

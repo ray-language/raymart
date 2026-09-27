@@ -141,19 +141,23 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
 
 | Qué | Verificado |
 |---|---|
-| Tests unitarios | common 12 · grpc 12 · products 13 · cart 7 · orders 15 · payment 10 · tools 10 — con la release 1.27.15, en VM y en nativo |
-| Integración | PostgreSQL 18: 5 (seis pedidos por la última unidad: gana uno; conexiones matadas por el servidor) · raykv: 2 (con TTL) · MySQL 8.4: 4 (pedido + outbox atómicos; conexiones matadas) · MongoDB 8: 2 (cinco CreateIntent concurrentes: un intent) |
+| Tests unitarios | common 7 · grpc 12 · products 14 · cart 7 · orders 15 · payment 10 · tools 10 — con la release 1.27.15, en VM y en nativo |
+| Integración | PostgreSQL 18: 6 (seis pedidos por la última unidad: gana uno; conexiones matadas por el servidor, también en una transacción) · raykv: 2 (con TTL) · MySQL 8.4: 4 (pedido + outbox atómicos; conexiones matadas) · MongoDB 8: 2 (cinco CreateIntent concurrentes: un intent) |
 | gRPC | contrato payment en proceso; interop con `grpcurl` (librería) |
 | Docker | las 11 piezas sanas; `make e2e` 19/19; `make chaos` pendiente → pagado; `make chaos-db` 19/19 tras reiniciar las bases; raywatch 11/11 en verde |
 | Carga | 29 600 lecturas/s directas y 16 900 por el gateway, ~140 compras/s de punta a punta con 64 usuarios; 0 errores y todas las invariantes ([perf/README.md](perf/README.md)) |
 
 ## Notas
 
-- **Pools de conexiones** en los adaptadores de salida (`libs/common/pool.ray`). Las fibras no
-  comparten heap, así que las conexiones viajan por un canal acotado: cada operación toma una,
-  la devuelve, o la cierra si el cable falló. Una conexión reutilizada que el servidor cerró
-  (un reinicio) se reemplaza y la operación idempotente se repite una vez. Tamaños:
-  `PG_POOL_SIZE`, `MYSQL_POOL_SIZE`, `MONGO_POOL_SIZE`, `RAYKV_POOL_SIZE`, `RPC_POOL_SIZE`.
+- **Pools de conexiones** en los adaptadores de salida, los de las librerías: `postgres.pool`,
+  `mysql.pool`, `mongo.pool` (db 0.2), `redis.pool` y el `net/pool` genérico para el cliente
+  gRPC (net 0.4); raygate usa `http.pool`. Las fibras no comparten heap, así que las conexiones
+  viajan por un canal acotado: cada operación toma una, la devuelve, o la cierra si el cable
+  falló. Una conexión reutilizada que el servidor cerró (un reinicio) se reemplaza y la
+  operación idempotente se repite una vez. Las transacciones pasan por `net/pool.run` y no por
+  `pool_tx`, que no reintenta ni cuando falla el BEGIN, y products traduce el cierre de sesión
+  de PostgreSQL (57P01) a error de cable (RAYLANG-FINDINGS #95, #96). Tamaños: `PG_POOL_SIZE`,
+  `MYSQL_POOL_SIZE`, `MONGO_POOL_SIZE`, `RAYKV_POOL_SIZE`, `RPC_POOL_SIZE`.
 - **El estado vive en las bases de datos.** Los handlers gRPC y HTTP reciben una *copia* de lo
   que capturan (por conexión), así que nada en memoria del proceso es estado compartido.
 - **Toolchain.** Las imágenes usan la release 1.27.15 (cada `ray.toml` la exige con

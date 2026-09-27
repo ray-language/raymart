@@ -1,12 +1,11 @@
-// PostgreSQL ProductRepository over a pool of connections (common/pool): an operation checks a
-// connection out, and gives it back — or drops it if the wire failed. A connection is used by
-// one fiber at a time and survives the request, so the handshake (a backend process and a
-// SCRAM exchange) is paid once per connection, not once per query, and closed sockets do not
-// pile up in TIME_WAIT until the ephemeral ports run out (perf/README.md). Reservations run
-// in one transaction with `SELECT … FOR UPDATE`, so two orders racing for the last unit cannot
-// both win.
+// PostgreSQL ProductRepository over a `postgres.Pool` (db): an operation takes a pooled
+// connection and gives it back — or drops it if the wire failed. A connection is used by one
+// fiber at a time and survives the request, so the handshake (a backend process and a SCRAM
+// exchange) is paid once per connection, not once per query, and closed sockets do not pile up
+// in TIME_WAIT until the ephemeral ports run out (perf/README.md). Reservations run in one
+// transaction with `SELECT … FOR UPDATE`, so two orders racing for the last unit cannot both win.
 import db/postgres;
-import common/pool;
+import net/pool;
 import std/crypto;
 import std/hex;
 import std/time;
@@ -14,12 +13,7 @@ from domain/ports import ProductRepository;
 from domain/product import Product, Line, Reserved;
 
 pub struct PostgresProducts {
-    host: string,
-    port: int,
-    user: string,
-    password: string,
-    database: string,
-    conns: pool.Pool<postgres.Conn>,
+    db: postgres.Pool,
 }
 
 /// The repository with a pool of up to `pool_size` connections (dialed on demand).
@@ -31,14 +25,7 @@ pub fn new_products(
     database: string,
     pool_size: int
 ) -> PostgresProducts {
-    PostgresProducts {
-        host: host,
-        port: port,
-        user: user,
-        password: password,
-        database: database,
-        conns: pool.new_pool(pool_size)
-    }
+    PostgresProducts { db: postgres.pool(host, port, user, password, database, pool_size) }
 }
 
 fn nonce() -> string {
@@ -46,22 +33,36 @@ fn nonce() -> string {
 }
 
 fn open(r: PostgresProducts) -> Result<postgres.Conn, string> {
-    match (postgres.connect(r.host, r.port, r.user, r.password, r.database, nonce())) {
+    let cfg = r.db.cfg;
+    match (postgres.connect(cfg.host, cfg.port, cfg.user, cfg.password, cfg.database, nonce())) {
         Result.Ok(c) => Result.Ok(c),
         Result.Err(e) => Result.Err("unavailable: products database: " + e),
     }
 }
 
-/// Runs `op` on a pooled connection. With `retry` (idempotent operations only), a reused
-/// connection that fails on the wire is replaced and `op` runs once more (common/pool.ray).
+// A server shutting down (a restart) or `pg_terminate_backend` ends each session with FATAL
+// 57P01, which `pool.is_wire_error` does not take for a dead connection: the pool would keep
+// it, and every pooled connection would fail one operation after a restart
+// (RAYLANG-FINDINGS #95). Phrase it as the wire error it is.
+fn wire(e: string) -> string {
+    if (e.contains("terminating connection due to administrator command")) {
+        return "the server closed the connection (" + e + ")";
+    }
+    e
+}
+
+/// Runs `op` on a pooled connection (net/pool). With `retry` (idempotent operations only), a
+/// reused connection that fails on the wire is replaced and `op` runs once more. Transactions
+/// go through here too: `postgres.pool_tx` never retries, not even when BEGIN fails on a
+/// connection the server closed while idle (RAYLANG-FINDINGS #96).
 fn with_conn<T>(
     r: PostgresProducts,
     retry: bool,
     op: fn(postgres.Conn) -> Result<T, string>
 ) -> Result<T, string> {
-    pool.run(r.conns, retry, fn() -> Result<postgres.Conn, string> { open(r) }, fn(c: postgres.Conn) {
+    pool.run(r.db.slots, fn() -> Result<postgres.Conn, string> { open(r) }, fn(c: postgres.Conn) {
         postgres.disconnect(c);
-    }, op)
+    }, fn(c: postgres.Conn) -> Result<T, string> { op(c).map_err(wire) }, retry)
 }
 
 fn to_int(s: string) -> int {
