@@ -45,44 +45,6 @@ fn with_conn<T>(
     pool.run(r.db.slots, fn() -> Result<mysql.Conn, string> { open(r) }, close_conn, op, retry)
 }
 
-/// Gives a connection back after an operation that ended with `out`: closed and its slot
-/// emptied when the wire failed, back to the pool otherwise.
-fn give_back<T>(r: MysqlOrders, c: mysql.Conn, out: Result<T, string>) {
-    match (out) {
-        Result.Err(e) => if (pool.is_wire_error(e)) {
-            close_conn(c);
-            pool.release_empty(r.db.slots);
-        } else {
-            pool.release(r.db.slots, c);
-        },
-        Result.Ok(_) => pool.release(r.db.slots, c),
-    }
-}
-
-// The order, its items and its outbox message in one transaction. Err("begin: …") when the
-// transaction could not even start: nothing was written, so a retry is safe.
-fn create_tx(
-    c: mysql.Conn,
-    order: Order,
-    outbox_kind: string,
-    outbox_payload: string
-) -> Result<int, string> {
-    match (mysql.exec(c, "START TRANSACTION", [])) {
-        Result.Ok(_) => { },
-        Result.Err(e) => return Result.Err("begin: " + e),
-    }
-    match (create_on(c, order, outbox_kind, outbox_payload)) {
-        Result.Ok(n) => match (mysql.exec(c, "COMMIT", [])) {
-            Result.Ok(_) => Result.Ok(n),
-            Result.Err(e) => Result.Err(e),
-        },
-        Result.Err(e) => {
-            let _ = mysql.exec(c, "ROLLBACK", []);
-            Result.Err(e)
-        },
-    }
-}
-
 fn to_int(s: string) -> int {
     parse_int(s).unwrap_or(0)
 }
@@ -228,40 +190,12 @@ fn outbox_on(c: mysql.Conn, limit: int) -> Result<[OutboxEntry], string> {
 
 impl OrderRepository for MysqlOrders {
     fn create(self, order: Order, outbox_kind: string, outbox_payload: string) -> Result<int, string> {
-        // Not idempotent (a lost COMMIT acknowledgement must not become a second attempt), so
-        // `mysql.pool_tx` would do, but it never retries: a stale connection is replaced here
-        // when the transaction could not even begin (RAYLANG-FINDINGS #96).
-        let (c, reused) = match (pool.acquire(self.db.slots)?) {
-            pool.Slot.Ready(c) => (c, true),
-            pool.Slot.Empty => match (open(self)) {
-                Result.Ok(c) => (c, false),
-                Result.Err(e) => {
-                    pool.release_empty(self.db.slots);
-                    return Result.Err(e);
-                },
-            },
-        };
-        let out = create_tx(c, order, outbox_kind, outbox_payload);
-        let began = match (out) {
-            Result.Err(e) => !e.starts_with("begin: "),
-            Result.Ok(_) => true,
-        };
-        if (reused && !began) {
-            close_conn(c);
-            return match (open(self)) {
-                Result.Ok(fresh) => {
-                    let again = create_tx(fresh, order, outbox_kind, outbox_payload);
-                    give_back(self, fresh, again);
-                    again
-                },
-                Result.Err(e) => {
-                    pool.release_empty(self.db.slots);
-                    Result.Err(e)
-                },
-            };
-        }
-        give_back(self, c, out);
-        out
+        // Not idempotent: `pool_tx` retries only a BEGIN that failed on a stale connection
+        // (nothing was written yet), never the body — a lost COMMIT acknowledgement must not
+        // become a second order.
+        mysql.pool_tx(self.db, fn(c: mysql.Conn) -> Result<int, string> {
+            create_on(c, order, outbox_kind, outbox_payload)
+        })
     }
 
     fn find(self, id: string) -> Result<Option<Order>, string> {

@@ -154,9 +154,8 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
   gRPC (net 0.4); raygate usa `http.pool`. Las fibras no comparten heap, así que las conexiones
   viajan por un canal acotado: cada operación toma una, la devuelve, o la cierra si el cable
   falló. Una conexión reutilizada que el servidor cerró (un reinicio) se reemplaza y la
-  operación idempotente se repite una vez. Las transacciones pasan por `net/pool.run` y no por
-  `pool_tx`, que no reintenta ni cuando falla el BEGIN, y products traduce el cierre de sesión
-  de PostgreSQL (57P01) a error de cable (RAYLANG-FINDINGS #95, #96). Tamaños: `PG_POOL_SIZE`,
+  operación idempotente se repite una vez. Las transacciones van por `pool_tx`, que reintenta
+  un BEGIN fallido en una conexión caducada pero nunca el cuerpo. Tamaños: `PG_POOL_SIZE`,
   `MYSQL_POOL_SIZE`, `MONGO_POOL_SIZE`, `RAYKV_POOL_SIZE`, `RPC_POOL_SIZE`.
 - **El estado vive en las bases de datos.** Los handlers gRPC y HTTP reciben una *copia* de lo
   que capturan (por conexión), así que nada en memoria del proceso es estado compartido.

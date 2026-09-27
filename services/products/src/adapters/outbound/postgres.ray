@@ -40,21 +40,8 @@ fn open(r: PostgresProducts) -> Result<postgres.Conn, string> {
     }
 }
 
-// A server shutting down (a restart) or `pg_terminate_backend` ends each session with FATAL
-// 57P01, which `pool.is_wire_error` does not take for a dead connection: the pool would keep
-// it, and every pooled connection would fail one operation after a restart
-// (RAYLANG-FINDINGS #95). Phrase it as the wire error it is.
-fn wire(e: string) -> string {
-    if (e.contains("terminating connection due to administrator command")) {
-        return "the server closed the connection (" + e + ")";
-    }
-    e
-}
-
 /// Runs `op` on a pooled connection (net/pool). With `retry` (idempotent operations only), a
-/// reused connection that fails on the wire is replaced and `op` runs once more. Transactions
-/// go through here too: `postgres.pool_tx` never retries, not even when BEGIN fails on a
-/// connection the server closed while idle (RAYLANG-FINDINGS #96).
+/// reused connection that fails on the wire is replaced and `op` runs once more.
 fn with_conn<T>(
     r: PostgresProducts,
     retry: bool,
@@ -62,7 +49,7 @@ fn with_conn<T>(
 ) -> Result<T, string> {
     pool.run(r.db.slots, fn() -> Result<postgres.Conn, string> { open(r) }, fn(c: postgres.Conn) {
         postgres.disconnect(c);
-    }, fn(c: postgres.Conn) -> Result<T, string> { op(c).map_err(wire) }, retry)
+    }, op, retry)
 }
 
 fn to_int(s: string) -> int {
@@ -138,20 +125,14 @@ fn seed() -> [(string, string, int, int)] {
     ]
 }
 
-fn rollback(c: postgres.Conn, e: string) -> Result<[Reserved], string> {
-    let _ = postgres.exec(c, "ROLLBACK", []);
-    Result.Err(e)
-}
-
+// Runs inside `postgres.pool_tx`: BEGIN before, COMMIT after, ROLLBACK when it returns Err.
 fn reserve_on(c: postgres.Conn, order_id: string, lines: [Line]) -> Result<[Reserved], string> {
-    postgres.exec(c, "BEGIN", [])?;
     let existing = postgres.query(
         c,
         "SELECT product_id, name, price_cents, qty FROM reservations WHERE order_id = $1 ORDER BY product_id",
         [order_id]
     )?;
     if (existing.len() > 0) {
-        postgres.exec(c, "COMMIT", [])?;
         var out: [Reserved] = [];
         for row in existing {
             out.push(
@@ -173,14 +154,14 @@ fn reserve_on(c: postgres.Conn, order_id: string, lines: [Line]) -> Result<[Rese
             [to_string(l.product_id)]
         )) {
             Result.Ok(r) => r,
-            Result.Err(e) => return rollback(c, e),
+            Result.Err(e) => return Result.Err(e),
         };
         if (rows.len() == 0) {
-            return rollback(c, "not_found: no product ${l.product_id}");
+            return Result.Err("not_found: no product ${l.product_id}");
         }
         let p = row_to_product(rows[0]);
         if (p.stock < l.qty) {
-            return rollback(c, "out_of_stock: product ${p.id} has ${p.stock} left");
+            return Result.Err("out_of_stock: product ${p.id} has ${p.stock} left");
         }
         match (postgres.exec(
             c,
@@ -188,7 +169,7 @@ fn reserve_on(c: postgres.Conn, order_id: string, lines: [Line]) -> Result<[Rese
             [to_string(l.qty), to_string(p.id)]
         )) {
             Result.Ok(_) => { },
-            Result.Err(e) => return rollback(c, e),
+            Result.Err(e) => return Result.Err(e),
         }
         match (postgres.exec(
             c,
@@ -196,18 +177,17 @@ fn reserve_on(c: postgres.Conn, order_id: string, lines: [Line]) -> Result<[Rese
             [order_id, to_string(p.id), p.name, to_string(p.price_cents), to_string(l.qty)]
         )) {
             Result.Ok(_) => { },
-            Result.Err(e) => return rollback(c, e),
+            Result.Err(e) => return Result.Err(e),
         }
         out.push(
             Reserved { product_id: p.id, name: p.name, price_cents: p.price_cents, qty: l.qty }
         );
     }
-    postgres.exec(c, "COMMIT", [])?;
     Result.Ok(out)
 }
 
+// Runs inside `postgres.pool_tx`.
 fn release_on(c: postgres.Conn, order_id: string) -> Result<int, string> {
-    postgres.exec(c, "BEGIN", [])?;
     let rows = postgres.query(
         c,
         "SELECT product_id, qty FROM reservations WHERE order_id = $1 AND status = 'reserved' FOR UPDATE",
@@ -221,7 +201,6 @@ fn release_on(c: postgres.Conn, order_id: string) -> Result<int, string> {
         "UPDATE reservations SET status = 'released' WHERE order_id = $1 AND status = 'reserved'",
         [order_id]
     )?;
-    postgres.exec(c, "COMMIT", [])?;
     Result.Ok(rows.len())
 }
 
@@ -269,7 +248,7 @@ impl ProductRepository for PostgresProducts {
     }
 
     fn reserve(self, order_id: string, lines: [Line]) -> Result<[Reserved], string> {
-        with_conn(self, true, fn(c: postgres.Conn) -> Result<[Reserved], string> { reserve_on(c, order_id, lines) })
+        postgres.pool_tx(self.db, fn(c: postgres.Conn) -> Result<[Reserved], string> { reserve_on(c, order_id, lines) })
     }
 
     fn commit(self, order_id: string) -> Result<int, string> {
@@ -283,13 +262,7 @@ impl ProductRepository for PostgresProducts {
     }
 
     fn release(self, order_id: string) -> Result<int, string> {
-        with_conn(self, true, fn(c: postgres.Conn) -> Result<int, string> {
-            let r = release_on(c, order_id);
-            if (r.is_err()) {
-                let _ = postgres.exec(c, "ROLLBACK", []);
-            }
-            r
-        })
+        postgres.pool_tx(self.db, fn(c: postgres.Conn) -> Result<int, string> { release_on(c, order_id) })
     }
 
     fn restock(self, id: int, qty: int) -> Result<Option<Product>, string> {
