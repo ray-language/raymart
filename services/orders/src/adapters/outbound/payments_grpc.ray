@@ -4,7 +4,7 @@
 // HTTP/2 connections are kept in a pool (net/pool) and reused call after call; one that fails or
 // receives GOAWAY is closed and its slot redialed on the next call.
 import std/json;
-import grpc/client;
+import net/grpc_conn as client;
 import common/paymentpb;
 import net/pool;
 import common/tracing;

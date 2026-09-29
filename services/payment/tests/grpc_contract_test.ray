@@ -1,10 +1,10 @@
 // The gRPC contract, end to end in one process: the payment service's real gRPC router (over
 // in-memory adapters) served on an ephemeral port, called with the raymart gRPC client the
 // way orders' outbox relay calls it.
-import grpc/server;
-import grpc/client;
+import net/grpc_server as server;
+import net/grpc_conn as client;
 import common/paymentpb;
-from grpc/server import Router;
+from net/grpc_server import Router;
 from application/payments import new_payments;
 import adapters/outbound/memory;
 import adapters/outbound/card_simulator;

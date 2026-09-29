@@ -5,14 +5,14 @@
 // unavailable → UNAVAILABLE (14), anything else → INTERNAL (13).
 import std/time;
 import std/uuid;
-import grpc/server;
-import grpc/status;
+import net/grpc_server as server;
+import net/grpc_status as status;
 import common/paymentpb;
 import common/httpx;
 import common/logs;
 import common/tracing;
-from grpc/server import Call, Router;
-from grpc/status import Status;
+from net/grpc_server import Call, Router;
+from net/grpc_status import Status;
 from domain/ports import IntentRepository, CardProcessor, Bus;
 from domain/intent import Intent;
 from application/payments import Payments, create_intent, get_intent;
