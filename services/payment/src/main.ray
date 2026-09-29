@@ -7,10 +7,10 @@
 import web/framework as web;
 import rpc/rpc;
 import net/http;
-import grpc/server;
+import net/grpc_server as server;
 import common/config;
 import common/logs;
-from grpc/server import Router;
+from net/grpc_server import Router;
 from application/payments import new_payments;
 import adapters/outbound/mongo_intents;
 import adapters/outbound/card_simulator;

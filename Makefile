@@ -1,7 +1,7 @@
 # raymart — common tasks. `make` lists them.
 
 COMPOSE := docker compose
-RAY_PROJECTS := libs/common $(wildcard services/*) $(wildcard libs/grpc) $(wildcard tools/*)
+RAY_PROJECTS := libs/common $(wildcard services/*) $(wildcard tools/*)
 
 .DEFAULT_GOAL := help
 
