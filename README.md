@@ -167,8 +167,3 @@ Errores con una sola forma: `{"error": {"code": "out_of_stock", "message": "…"
   toolchain del host. `make test` y `make test-it` usan el `ray` local.
 - El JWT de desarrollo (`raymart-dev-secret-change-me`) está en `docker-compose.yml` y en
   `config/raygate.toml`: cámbialo en ambos (o `RAYMART_JWT_SECRET` + la config del gateway).
-
-## Hallazgos de dogfood
-
-Los hallazgos sobre raylang que salieron de este proyecto están en
-[`ray-apps/RAYLANG-FINDINGS.md`](../RAYLANG-FINDINGS.md), sección raymart.
